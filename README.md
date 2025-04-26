@@ -2,7 +2,6 @@
 
 Gemini API または OpenAI互換API (Mistralなど) を使用した、Discord向けの多機能チャットボットです。特定のペルソナ（プラナ）での応答、ファイル添付への対応、会話履歴のキャッシュ、長期記憶 (Deep Cache)、追跡質問ボタン、タイマー、投票機能などを備えています。
 
-![Discord Bot Example](https://via.placeholder.com/600x400.png?text=Discord+Bot+Screenshot+Here) <!-- スクリーンショットがあれば置き換えてください -->
 
 ## 特徴 (Features)
 
