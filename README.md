@@ -79,7 +79,7 @@ Gemini API または OpenAI互換API (Mistralなど) を使用した、Discord�
     ```
 
    これでも可能です
-   ```bash
+    ```bash
     pip install -r requirements.txt
     ```
 
