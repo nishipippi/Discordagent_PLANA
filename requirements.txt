@@ -1,4 +1,6 @@
+# requirements.txt
 discord.py
-google-generativeai
-python-dotenv
+python_dotenv
 aiofiles
+google-generativeai
+openai
