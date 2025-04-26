@@ -13,7 +13,6 @@ Gemini API または OpenAI互換API (Mistralなど) を使用した、Discord�
 *   **追跡質問ボタン:** Botの応答メッセージに、次の質問や関連情報への興味を引くボタンを動的に生成・追加します。
 *   **タイマー機能:** 指定した時間後にメッセージでお知らせします。
 *   **投票機能:** 簡単なコマンドでサーバーメンバー向けの投票を作成できます。
-*   **エラーメッセージのカスタマイズ:** LLMのエラーなどを、Botのペルソナに合わせたメッセージで通知します。
 
 ## ファイル構成 (File Structure)
 
@@ -158,6 +157,7 @@ Botが起動し、Discordサーバーに参加したら、以下の方法でBot�
 *   google-generativeai (Gemini API)
 *   openai (OpenAI互換 API)
 *   aiofiles (非同期ファイルI/O)
+*   Mr.coffin399 https://github.com/coffin399
 
 ---
 ```
