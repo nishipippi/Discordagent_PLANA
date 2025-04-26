@@ -1,4 +1,4 @@
-# PLANA Discord Bot
+# LLM Discord Bot
 
 Gemini API または OpenAI互換API (Mistralなど) を使用した、Discord向けの多機能チャットボットです。特定のペルソナ（プラナ）での応答、ファイル添付への対応、会話履歴のキャッシュ、長期記憶 (Deep Cache)、追跡質問ボタン、タイマー、投票機能などを備えています。
 
