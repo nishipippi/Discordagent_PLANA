@@ -78,6 +78,11 @@ Gemini API または OpenAI互換API (Mistralなど) を使用した、Discord�
     pip install aiofiles python-dotenv discord.py google-generativeai openai
     ```
 
+   これでも可能です
+   ```bash
+    pip install -r requirements.txt
+    ```
+
 4.  **.env ファイルを設定します:**
     `.env.example` ファイルをコピーして `.env` という名前で保存し、エディタで開いてください。
 
