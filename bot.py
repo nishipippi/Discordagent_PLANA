@@ -10,7 +10,7 @@ import aiofiles
 import mimetypes
 import base64
 from typing import List, Dict, Any, Optional, Tuple
-from dotenv import load_dotenv # python-dotenv ライブラリのdotenvモジュール
+from dotenv import load_dotenv
 
 # --- プロバイダーと定数をインポート ---
 from llm_provider import LLMProvider # インターフェース
@@ -20,34 +20,29 @@ import bot_constants # 定数ファイル
 
 # --- 設定項目 ---
 # 0. 環境変数の読み込み
-# この load_dotenv() が成功しているかどうかが重要
 try:
     load_dotenv()
     print(".env ファイル読み込み成功。")
 except Exception as e:
     print(f"警告: .env ファイル読み込み中にエラー: {e}")
-    # .env ファイルがない、または内容に問題がある可能性
 
-LLM_PROVIDER_NAME = os.getenv('LLM_PROVIDER', 'GEMINI').upper() # デフォルトはGEMINI
+LLM_PROVIDER_NAME = os.getenv('LLM_PROVIDER', 'GEMINI').upper()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
-# APIキーとURL (プロバイダーによって読み込む)
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 MISTRAL_API_KEY = os.getenv('MISTRAL_API_KEY')
-MISTRAL_API_BASE_URL = os.getenv('MISTRAL_API_BASE_URL', 'https://api.mistral.ai/v1') # Mistralのデフォルトエンドポイント
+MISTRAL_API_BASE_URL = os.getenv('MISTRAL_API_BASE_URL', 'https://api.mistral.ai/v1')
 
-# モデル設定 (プロバイダーに応じて読み込む)
 MODEL_CONFIG: Dict[str, str] = {}
 API_KEY_FOR_PROVIDER: Optional[str] = None
 API_BASE_URL_FOR_PROVIDER: Optional[str] = None
 
-# LLM_PROVIDER_NAME に基づいて設定を決定
 if LLM_PROVIDER_NAME == 'GEMINI':
     MODEL_CONFIG['primary'] = os.getenv('GEMINI_PRIMARY_MODEL', 'gemini-1.5-pro-latest')
     MODEL_CONFIG['secondary'] = os.getenv('GEMINI_SECONDARY_MODEL', 'gemini-1.5-flash-latest')
     MODEL_CONFIG['lowload'] = os.getenv('GEMINI_LOWLOAD_MODEL', 'gemini-1.5-flash-latest')
     API_KEY_FOR_PROVIDER = GEMINI_API_KEY
-    API_BASE_URL_FOR_PROVIDER = None # GeminiProvider は base_url を使わない
+    API_BASE_URL_FOR_PROVIDER = None
 
 elif LLM_PROVIDER_NAME == 'MISTRAL':
     MODEL_CONFIG['primary'] = os.getenv('MISTRAL_PRIMARY_MODEL', 'pixtral-large-latest')
@@ -59,18 +54,17 @@ elif LLM_PROVIDER_NAME == 'MISTRAL':
 else:
     print(f"Error: Unknown LLM_PROVIDER '{LLM_PROVIDER_NAME}' specified in .env. Please use 'GEMINI' or 'MISTRAL'.")
     print("Attempting to initialize with GEMINI provider settings as a fallback.")
-    # 未知のプロバイダー名の場合、Gemini設定を試みる
-    LLM_PROVIDER_NAME = 'GEMINI' # プロバイダー名をGeminiに上書き
+    LLM_PROVIDER_NAME = 'GEMINI'
     MODEL_CONFIG['primary'] = os.getenv('GEMINI_PRIMARY_MODEL', 'gemini-1.5-pro-latest')
     MODEL_CONFIG['secondary'] = os.getenv('GEMINI_SECONDARY_MODEL', 'gemini-1.5-flash-latest')
     MODEL_CONFIG['lowload'] = os.getenv('GEMINI_LOWLOAD_MODEL', 'gemini-1.5-flash-latest')
     API_KEY_FOR_PROVIDER = GEMINI_API_KEY
-    API_BASE_URL_FOR_PROVIDER = None # GeminiProviderはbase_urlを使わない
+    API_BASE_URL_FOR_PROVIDER = None
 
 
 # 2. ペルソナ設定
 PERSONA_TEMPLATE = bot_constants.PERSONA_TEMPLATE
-PERSONA_INSTRUCTION = "" # on_ready で client_id を埋め込んで設定
+PERSONA_INSTRUCTION = ""
 
 # 3. 会話キャッシュ設定
 CACHE_DIR = "cache"
@@ -126,7 +120,7 @@ FOLLOW_UP_PROMPT = """
 MAX_FOLLOW_UP_BUTTONS = 3
 
 # --- グローバル変数 ---
-llm_handler: Optional[LLMProvider] = None # APIプロバイダーのインスタンス
+llm_handler: Optional[LLMProvider] = None
 discord_client_id = "Unknown"
 
 # --- 初期化処理 ---
@@ -138,7 +132,6 @@ async def initialize_llm_provider() -> bool:
     PERSONA_INSTRUCTION = PERSONA_TEMPLATE.format(client_id=discord_client_id)
 
     try:
-        # --- プロバイダーインスタンス生成 ---
         if LLM_PROVIDER_NAME == 'GEMINI':
             llm_handler = GeminiProvider()
             if not API_KEY_FOR_PROVIDER:
@@ -162,7 +155,6 @@ async def initialize_llm_provider() -> bool:
             llm_handler = None
             return False
 
-        # --- プロバイダーの初期化メソッドを実行 (エラーを捕捉) ---
         print(f"Initializing {LLM_PROVIDER_NAME} Provider...")
         initialized = await llm_handler.initialize(
             api_key=API_KEY_FOR_PROVIDER,
@@ -475,9 +467,8 @@ class FollowUpView(discord.ui.View):
         async with interaction.channel.typing():
             chat_history = await load_cache(channel_id)
             deep_cache_summary = await load_deep_cache(channel_id)
-            user_entry_parts = [{'text': button_label}] # ボタンはテキストのみ
+            user_entry_parts = [{'text': button_label}]
 
-            # 抽象化されたLLMハンドラーを呼び出す
             used_model_name, response_text = await llm_handler.generate_response(
                 content_parts=user_entry_parts,
                 chat_history=chat_history,
@@ -498,13 +489,10 @@ class FollowUpView(discord.ui.View):
                         await interaction.channel.send(chunk)
 
                 if not is_error_response:
-                    # キャッシュ更新
                     current_history = chat_history + [{'role': 'user', 'parts': user_entry_parts}]
                     current_history.append({'role': 'model', 'parts': [{'text': response_text}]})
                     await save_cache(channel_id, current_history)
-                    # print(f"チャンネル {channel_id} キャッシュ更新。")
 
-                    # --- 連続ボタン生成 ---
                     if sent_followup_message:
                         await generate_and_add_followup_buttons(sent_followup_message, channel_id)
                     else:
@@ -526,7 +514,6 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     global discord_client_id, llm_handler
-    # Botユーザー情報の取得
     if client.user:
         discord_client_id = str(client.user.id)
         print(f"Client ID 設定: {discord_client_id}")
@@ -534,28 +521,23 @@ async def on_ready():
         print("CRITICAL: Botユーザー情報の取得に失敗しました。")
         await client.close(); return
 
-    # LLMプロバイダーの初期化
     if not await initialize_llm_provider():
          print("CRITICAL: LLM Provider の初期化に失敗しました。Botを終了します。")
          await client.close(); return
 
-    # Discordトークンの最終チェック (initialize_llm_provider より後でよい)
     if not DISCORD_TOKEN:
         print("CRITICAL: DISCORD_TOKEN が .env に未設定。")
         await client.close(); return
 
-
-    # キャッシュディレクトリの確認と作成
     for cache_dir in [CACHE_DIR, DEEP_CACHE_DIR]:
         if not os.path.exists(cache_dir):
             try: os.makedirs(cache_dir); print(f"ディレクトリ '{cache_dir}' 作成。")
             except Exception as e: print(f"警告: '{cache_dir}' 作成失敗: {e}")
 
     print('--------------------------------------------------')
-    print("接続確認。…命令待機中。なにか御用でしょうか。") # starter_promptの内容
+    print("接続確認。…命令待機中。なにか御用でしょうか。")
     print(f'アカウント {client.user} としてログイン。')
     print(f'プロバイダー: {LLM_PROVIDER_NAME}')
-    # モデル設定のログ出力に LLMハンドラーの get_model_name メソッドを使用
     if llm_handler:
         primary_name = llm_handler.get_model_name('primary') or "N/A"
         secondary_name = llm_handler.get_model_name('secondary') or "N/A"
@@ -564,9 +546,7 @@ async def on_ready():
     if API_BASE_URL_FOR_PROVIDER: print(f'API Base URL: {API_BASE_URL_FOR_PROVIDER}')
     print('--------------------------------------------------')
 
-    # Botのステータスメッセージ設定
     activity_text = f"命令待機中 ({LLM_PROVIDER_NAME}) | !poll, !timer, !csum, !cclear"
-    # 低負荷モデルがあるかどうかはLLMハンドラーのget_model_nameで確認
     if llm_handler and (llm_handler.get_model_name('lowload') is None or llm_handler.get_model_name('lowload') == ""):
          activity_text += " (一部機能制限)"
     await client.change_presence(activity=discord.Game(name=activity_text))
@@ -582,7 +562,6 @@ async def on_message(message: discord.Message):
         print("Warning: LLM Handler not initialized. Skipping message processing.")
         return
 
-    # --- 以下、メッセージ処理のロジック ---
     if message.content:
         content_lower = message.content.lower()
 
@@ -608,7 +587,7 @@ async def on_message(message: discord.Message):
                 if not timer_prompt: await message.reply(bot_constants.ERROR_MSG_TIMER_INVALID + " 内容を指定してください。", mention_author=False); return
                 if minutes <= 0: await message.reply(bot_constants.ERROR_MSG_TIMER_INVALID + " 時間は1分以上で指定してください。", mention_author=False); return
                 await message.channel.send(f"{minutes}分後にタイマーを設定しました。 内容: 「{timer_prompt}」")
-                print(f"タイマー設定: {minutes}分後, {timer_prompt}, Ch: {message.channel.name}") # ログプロンプト修正
+                print(f"タイマー設定: {minutes}分後, {timer_prompt}, Ch: {message.channel.name}")
                 asyncio.create_task(execute_timer(message.channel, minutes, timer_prompt, message.author))
             else: await message.reply(bot_constants.ERROR_MSG_TIMER_INVALID + " 例: `!timer 10分 作業終了`", mention_author=False)
             return
@@ -708,6 +687,7 @@ async def on_message(message: discord.Message):
             else: print("Deep Cache情報なし。")
 
             # 4. LLM API呼び出し (抽象化)
+            # generate_response は内部で適切なモデル名を使って変換を行う
             used_model_name, response_text = await llm_handler.generate_response(
                 content_parts=request_parts,
                 chat_history=chat_history,
@@ -717,13 +697,21 @@ async def on_message(message: discord.Message):
             # 5. 応答送信
             sent_message = None
             if response_text:
-                response_chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
-                first_chunk = True
-                for chunk in response_chunks:
-                    if first_chunk: sent_message = await message.reply(chunk, mention_author=False); first_chunk = False
-                    else: await message.channel.send(chunk)
+                is_error_response_text = llm_handler._is_error_message(response_text) # エラー判定用
+
+                if not is_error_response_text: # エラーメッセージでない場合のみ分割送信
+                    response_chunks = [response_text[i:i+1990] for i in range(0, len(response_text), 1990)]
+                    first_chunk = True
+                    for chunk in response_chunks:
+                        if first_chunk: sent_message = await message.reply(chunk, mention_author=False); first_chunk = False
+                        else: await message.channel.send(chunk)
+                else:
+                    # エラーメッセージの場合はそのまま送信
+                    await message.reply(response_text, mention_author=False)
+
 
             # 6. キャッシュ更新
+            # エラー判定は LLM Provider が返すメッセージに基づいて行う
             is_error_response = response_text is None or llm_handler._is_error_message(response_text)
 
             if not is_error_response and not use_channel_history:
@@ -732,9 +720,11 @@ async def on_message(message: discord.Message):
                 user_entry_parts.extend({'inline_data': file_info} for file_info in attached_files_data_for_cache)
                 if user_entry_parts:
                      current_history = chat_history + [{'role': 'user', 'parts': user_entry_parts}]
-                     if response_text: current_history.append({'role': 'model', 'parts': [{'text': response_text}]})
+                     # モデル応答はテキストのみキャッシュ (画像応答はキャッシュしない)
+                     if response_text and not llm_handler._is_error_message(response_text):
+                         current_history.append({'role': 'model', 'parts': [{'text': response_text}]})
                      await save_cache(channel_id, current_history)
-                     # print(f"チャンネル {channel_id} キャッシュ更新。")
+
 
             # 7. 追跡質問ボタン生成
             if sent_message and not is_error_response:
@@ -764,10 +754,9 @@ async def execute_timer(channel: discord.TextChannel, minutes: int, prompt: str,
 
 # --- BOT起動 ---
 if __name__ == "__main__":
-    # 依存ライブラリチェック
     try:
         import aiofiles
-        # import dotenv
+        import dotenv
         if LLM_PROVIDER_NAME == 'GEMINI':
             import google.generativeai
         elif LLM_PROVIDER_NAME == 'MISTRAL':

@@ -35,9 +35,9 @@ class LLMProvider(ABC):
     @abstractmethod
     async def generate_response(
         self,
-        content_parts: List[Dict[str, Any]],
-        chat_history: Optional[List[Dict[str, Any]]] = None,
-        deep_cache_summary: Optional[str] = None,
+        content_parts: List[Dict[str, Any]], # 現在のユーザー入力（結合済みテキスト+添付）
+        chat_history: Optional[List[Dict[str, Any]]] = None, # 過去の会話履歴（キャッシュまたはチャンネル履歴）
+        deep_cache_summary: Optional[str] = None, # Deep Cacheサマリー
     ) -> Tuple[str, str]:
         """
         通常の応答を生成する。レートリミット時はフォールバックを試みる。
@@ -86,7 +86,6 @@ class LLMProvider(ABC):
 
     def _is_error_message(self, text: str) -> bool:
         """応答テキストがエラーメッセージかどうかを簡易的に判定するヘルパー"""
-        # bot_constants のエラーメッセージ定数を参照して判定
         error_keywords = [
             bot_constants.ERROR_MSG_MAX_TEXT_SIZE,
             bot_constants.ERROR_MSG_MAX_IMAGE_SIZE,
