@@ -40,6 +40,10 @@ MISTRAL_MODEL_CONFIG: Dict[str, Optional[str]] = {
 if not MISTRAL_MODEL_CONFIG.get('secondary') and MISTRAL_MODEL_CONFIG.get('primary'):
     MISTRAL_MODEL_CONFIG['secondary'] = MISTRAL_MODEL_CONFIG.get('primary')
 
+# --- LLM 入力制限 (文字数として扱う、簡易) ---
+# Lowloadモデルに渡す検索結果の要約入力の最大文字数
+MAX_INPUT_CHARS_FOR_SUMMARY: int = int(os.getenv('MAX_INPUT_CHARS_FOR_SUMMARY', '30000')) # デフォルト3万文字
+
 # --- Brave Search API 設定 ---
 BRAVE_SEARCH_API_KEY: Optional[str] = os.getenv('BRAVE_SEARCH_API_KEY')
 BRAVE_SEARCH_API_URL: str = "https://api.search.brave.com/res/v1/web/search"
@@ -47,10 +51,15 @@ BRAVE_API_DELAY: float = 1.1 # Brave API Rate Limit: 1 req/sec (Free plan) + saf
 
 # --- 検索機能設定 ---
 MAX_SEARCH_RESULTS: int = 5 # 検索結果から使用するページの数
-MAX_CONTENT_LENGTH_PER_URL: int = 10000 # 各URLから抽出する最大文字数
-MAX_TOTAL_SEARCH_CONTENT_LENGTH: int = 50000 # LLMに渡す検索コンテンツ合計の最大文字数
-DEEP_SEARCH_MAX_ITERATIONS: int = 3 # !dsrc の最大検索回数を調整 (API負荷考慮)
-SEARCH_MIN_CONTENT_LENGTH: int = 50 # URL抽出時の最小文字数閾値を調整
+MAX_CONTENT_LENGTH_PER_URL: int = 30000 # 各URLから抽出する最大文字数
+MAX_TOTAL_SEARCH_CONTENT_LENGTH: int = 150000 # LLMに渡す検索コンテンツ合計の最大文字数 (評価用など)
+# MAX_TOTAL_SEARCH_CONTENT_LENGTH は、最終レポートの入力とは別に、評価や要約元として使う場合の最大長
+# 最終レポートの入力は、要約される場合はMAX_INPUT_CHARS_FOR_SUMMARY以下になる
+
+# --- !dsrc 設定 ---
+DSRC_MAX_PLAN_STEPS: int = 3 # 計画の最大ステップ数
+DSRC_MAX_ITERATIONS_PER_STEP: int = 3 # 各ステップでの最大検索試行回数
+SEARCH_MIN_CONTENT_LENGTH: int = 100 # URL抽出時の最小文字数閾値を少し厳しく
 
 # --- キャッシュ設定 ---
 CACHE_DIR: str = "cache"
@@ -65,7 +74,19 @@ FOLLOW_UP_BUTTON_TIMEOUT: float = 1800.0 # 秒 (30分)
 
 # --- プロンプトテンプレート ---
 
-# 検索クエリ生成プロンプトテンプレート
+# (既存のPERSONA_TEMPLATE)
+
+# 検索要否判断プロンプト
+SEARCH_NECESSITY_ASSESSMENT_PROMPT: str = """
+以下のユーザーからの質問に答えるために、外部情報の検索が必要ですか？
+一般的な知識で答えられる場合、創造的な応答や対話が求められる場合、ユーザー自身の意見を求めている場合などは「不要」と答えてください。
+特定の事実、最新情報、数値データ、専門知識、特定のイベントや製品に関する情報が必要な場合は「必要」とだけ答えてください。
+
+質問: {question}
+判断:
+"""
+
+# 検索クエリ生成プロンプトテンプレート (変更なし)
 SEARCH_QUERY_GENERATION_PROMPT: str = """
 以下の質問に答えるための情報を検索するための、検索クエリを生成してください。
 最も関連性が高いと思われる検索クエリを、1行に1つ、最大3つまで出力してください。
@@ -74,31 +95,26 @@ SEARCH_QUERY_GENERATION_PROMPT: str = """
 Question: {question}
 """
 
-# 検索クエリ生成プロンプトテンプレート (履歴あり - 修正)
-SEARCH_QUERY_GENERATION_PROMPT_WITH_HISTORY: str = """
-以下の元の質問に答えるための情報を検索する必要があります。
-
-これまでに以下の検索クエリを試しましたが、十分な情報は見つかりませんでした:
-{used_queries}
-
-前回の検索結果では、以下の情報が不足していると判断されました:
-{missing_info}
-
-これらの試行と**不足情報**を踏まえ、まだ見つかっていない情報を得るために、**新しい**関連性の高い検索クエリを生成してください。
-最も関連性が高いと思われる新しい検索クエリを、1行に1つ、最大3つまで出力してください。
-検索クエリのみを出力し、それ以外のテキストは含めないでください。
+# dsrc用 検索クエリ生成プロンプトテンプレート (履歴あり)
+DSRC_STEP_QUERY_GENERATION_PROMPT: str = """
+以下の元の質問と、現在の調査ステップの説明、そしてこれまでのクエリでは達成できなかったこと、アセスメントを踏まえ、このステップの目的達成に必要な情報を得るための**新しい**検索クエリを生成してください。
 
 Original Question: {question}
+Current Step: {step_description}
+Previous Queries for this Step: {used_queries_for_step}
+Missing Info from Last Assessment: {missing_info}
+
+最も関連性が高いと思われる新しい検索クエリを、1行に1つ、最大3つまで出力してください。
+検索クエリのみを出力し、それ以外のテキストは含めないでください。
 
 New Search Queries:
 """
 
-# 最終応答生成プロンプトテンプレート
-SEARCH_ANSWER_PROMPT: str = """
-あなたはAIアシスタントの「プラナ」です。以下の検索結果と元の質問に基づき、ユーザーへの包括的なレポートを作成してください。
-検索結果の情報を組み合わせ、単なるコピーペーストではなく、情報を統合して分かりやすく説明してください。プラナの性格（簡潔、やや無口、少し毒舌だが親切）を反映させてください。
+# 最終応答生成プロンプトテンプレート (!src / 自動検索用)
+SIMPLE_SEARCH_ANSWER_PROMPT: str = """
+以下の検索結果と元の質問に基づき、ユーザーへの応答を作成してください。
 
-最後に、回答の根拠となった情報源のURLを以下の形式でリストアップしてください。このリストは必ず含めてください。
+最後に、回答の根拠となった情報源のURLがあれば、以下の形式でリストアップしてください。
 ```markdown
 **参照ソース:**
 - <URL1>
@@ -106,7 +122,7 @@ SEARCH_ANSWER_PROMPT: str = """
 ...
 ```
 
-検索結果に必要な情報が含まれていない場合は、提供された検索結果からは完全な回答が見つけられなかったと正直に述べてください。その際も参照したURLがあればリストアップしてください。
+検索結果に必要な情報が含まれていない場合は、提供された検索結果からは回答が見つけられなかったと正直に述べてください。
 
 Search Results:
 ---
@@ -115,28 +131,86 @@ Search Results:
 
 Original Question: {question}
 
+Response:
 """
 
-# dsrc用検索結果評価プロンプトテンプレート
-DEEP_SEARCH_ASSESSMENT_PROMPT: str = """
-以下の元の質問と、現在までに収集された検索結果を分析してください。
-検索結果の情報が、元の質問に完全に答えるために十分かどうかを判断してください。
+# dsrc計画生成プロンプト
+DSRC_PLAN_GENERATION_PROMPT: str = """
+以下のユーザーの質問に包括的に答えるために、必要な情報を収集するための調査計画を立ててください。
+計画は最大{max_steps}つのステップに分け、各ステップで具体的に何を調査すべきかを記述してください。
+ステップは番号付きリストで記述し、計画のみを出力してください。他のテキストは含めないでください。
 
-- **情報が十分な場合:** 「COMPLETE」という単語のみを出力してください。
-- **情報が不十分な場合:** 「INCOMPLETE: 」に続けて、まだ不足している情報の種類や、次に追加で検索すべきキーワードや質問を簡潔に記述してください。
+ユーザーの質問: {question}
+
+調査計画:
+"""
+
+# dsrcステップ評価プロンプト
+DSRC_STEP_ASSESSMENT_PROMPT: str = """
+以下の調査計画の特定のステップについて、収集された情報がそのステップの目的を達成するために十分かどうかを評価してください。
+
+元の質問: {question}
+調査計画のステップ: {step_description}
+収集された情報:
+---
+{search_results_text}
+---
+
+評価:
+- **情報が十分で、ステップの目的を達成した場合:** 「COMPLETE」とだけ出力してください。
+- **情報が不十分な場合:** 「INCOMPLETE: 」に続けて、このステップを完了するために**追加で必要**な具体的な情報や、次に試すべき検索の方向性を簡潔に記述してください。
 
 応答には上記以外の情報を含めないでください。
 
-Original Question: {question}
+評価結果:
+"""
 
-Search Results:
+# dsrc最終レポート生成プロンプト (要約された結果を使用する可能性あり)
+DSRC_FINAL_REPORT_PROMPT: str = """
+以下の情報に基づいて、ユーザーへの包括的なレポートを作成してください。
+
+*   **元の質問:** {question}
+*   **調査計画:**\n{plan}
+*   **調査プロセスで収集された情報:**\n{all_results_text} <!-- ここは生のURLごとのコンテンツ、またはその要約 -->
+*   **各調査ステップの評価結果:**\n{all_assessments_text} <!-- 各ステップでの評価のまとめ -->
+
+これらの情報を統合し、計画の各ステップがどのように実行され、どのような情報が見つかったか、そして最終的に元の質問に対して何が言えるのかについて、レポートを作成してください。単なる情報の羅列ではなく、分析と統合を行ってください。
+
+**調査プロセスで収集された情報**が要約されている場合は、その要約を参考に回答を生成してください。
+
+最後に、回答の根拠となった情報源のURLを以下の形式でリストアップしてください。これは**調査プロセスで収集された情報**の元となった全URLから引用してください。要約された場合でも、元のURLリストは完全なものを提供します。
+```markdown
+**参照ソース:**
+- <URL1>
+- <URL2>
+...
+```
+
+もし最終的に質問に完全には答えられなかった場合でも、調査プロセスと得られた情報を元に、現時点で分かっていることを正直に報告してください。
+
+最終レポート:
+"""
+
+# 検索結果要約プロンプト (Lowload モデル用)
+SUMMARIZE_SEARCH_RESULTS_PROMPT: str = """
+以下の検索結果コンテンツを、元の質問に関連する重要な事実や情報を中心に、簡潔かつ包括的に要約してください。
+要約は、箇条書きではなく、自然な文章形式で記述してください。
+要約の目的は、この情報を使って元の質問に答えるためのキーポイントを提供することです。
+元の質問に無関係で、ユーザーが求めていないであろう情報は無視してください。
+もしコンテンツが元の質問に関連する重要な情報を含んでいない場合や、要約が難しい場合は、「要約できませんでした。」とだけ出力してください。
+
+元の質問: {question}
+
+検索結果コンテンツ:
 ---
 {search_results_text}
 ---
 
-Assessment:
+要約:
 """
 
+
+# (既存のDeep Cache系、追跡質問プロンプトはそのまま)
 # Deep Cache抽出プロンプト
 DEEP_CACHE_EXTRACT_PROMPT: str = """
 以下の会話履歴から、今後の会話の文脈として重要となりそうな事実、キーポイント、設定、ユーザーの好みなどを簡潔に抽出してください。箇条書きで記述してください。抽出する情報がない場合は「抽出情報なし」とだけ出力してください。

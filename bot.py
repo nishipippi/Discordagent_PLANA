@@ -5,6 +5,7 @@ import discord
 import os
 import asyncio
 from typing import Optional, Literal
+import re
 
 # --- モジュールインポート ---
 import config
@@ -15,6 +16,7 @@ import search_handler
 import command_handler
 import discord_ui
 from llm_provider import LLMProvider # 型ヒント用
+
 
 # --- Discordクライアント設定 ---
 intents = discord.Intents.default()
@@ -137,60 +139,76 @@ async def on_ready():
 async def on_message(message: discord.Message):
     """メッセージ受信時の処理"""
     # --- 基本チェック ---
-    if message.author == client.user: return # 自分自身のメッセージ
-    if not message.guild: return # DM無視
-    if not client.user: return # クライアント情報がない (起動直後など)
+    if message.author == client.user: return
+    if not message.guild: return
+    if not client.user: return
 
-    # --- LLMハンドラーが利用不可の場合は基本応答しない ---
     llm_handler = llm_manager.get_current_provider()
+    # LLMが利用不可でも検索要否判断はさせたいが、検索自体はLLMが必要
+    # メンション応答もLLMが必要なので、ここで弾くのは維持する
     if not llm_handler:
-        # メンションされた場合のみエラー応答
         if client.user.mentioned_in(message):
             await message.reply(bot_constants.ERROR_MSG_INTERNAL + " (LLM Provider not available)", mention_author=False)
-        return # LLMが使えないので以降の処理はスキップ
+        return
 
-    # --- メッセージ内容に基づく処理分岐 ---
     content_lower = message.content.lower().strip() if message.content else ""
     is_mention = client.user.mentioned_in(message)
 
-    # 1. メンション付き検索コマンド (!src, !dsrc)
+    # 1. 通常コマンド (!gemini, !mistral, etc.)
+    #    検索コマンド(!src, !dsrc)はメンション必須のためここでは処理しない
+    if not is_mention:
+        command_processed = await command_handler.handle_command(message)
+        if command_processed:
+            if content_lower in ['!gemini', '!mistral']:
+                 await update_presence()
+            return # コマンド処理完了なら終了
+
+    # 2. メンション付きメッセージの処理
     if is_mention:
-        # メンションを除去したコンテンツでコマンドをチェック
+        # メンション文字列を除去
         mention_strings = [f'<@!{client.user.id}>', f'<@{client.user.id}>']
         content_without_mention = message.content
         for mention in mention_strings:
             content_without_mention = content_without_mention.replace(mention, '').strip()
-        content_without_mention_lower = content_without_mention.lower()
 
-        search_command_type: Optional[Literal['src', 'dsrc']] = None
-        query_text = ""
-        if content_without_mention_lower.startswith('!src '):
-            search_command_type = 'src'
-            query_text = content_without_mention[len('!src '):].strip()
-        elif content_without_mention_lower.startswith('!dsrc '):
-            search_command_type = 'dsrc'
-            query_text = content_without_mention[len('!dsrc '):].strip()
+        # 2a. -nosrc フラグチェック
+        no_search_flag_match = re.search(r'\s-nosrc\b', content_without_mention, re.IGNORECASE)
+        question_text = content_without_mention # デフォルト
+        perform_search_assessment = True # 検索要否判断を行うか
+        if no_search_flag_match:
+            question_text = content_without_mention.replace(no_search_flag_match.group(0), '').strip()
+            perform_search_assessment = False
+            print("'-nosrc' flag detected. Skipping search assessment.")
 
-        if search_command_type and query_text:
-            # 検索コマンド実行
-            asyncio.create_task(search_handler.handle_search_command(message, search_command_type, query_text))
-            return # 検索コマンド処理に任せる
+        # 2b. 検索コマンド (!src, !dsrc) チェック
+        #    注意: コマンドと -nosrc が同時に指定された場合の挙動は未定義だが、コマンドを優先する
+        search_command_match = re.match(r'!(src|dsrc)\s+(.*)', content_without_mention, re.IGNORECASE | re.DOTALL)
+        if search_command_match:
+            search_command_type = search_command_match.group(1).lower()
+            query_text_for_command = search_command_match.group(2).strip()
+            if query_text_for_command:
+                # search_handler に処理を移譲
+                asyncio.create_task(search_handler.handle_search_command(message, search_command_type, query_text_for_command))
+            else:
+                await message.reply(f"!{search_command_type} の後に検索内容を指定してください。", mention_author=False)
+            return # 検索コマンド処理後は終了
 
-    # 2. その他のコマンド (!gemini, !mistral, !csum, !cclear, !timer, !poll, !his [メンションなし])
-    # 注意: 検索コマンドは上記で処理されるため、handle_commandからは削除する
-    command_processed = await command_handler.handle_command(message)
-    if command_processed:
-        if content_lower in ['!gemini', '!mistral']:
-             await update_presence() # プロバイダー切り替え後は必ず更新
-        return # コマンドが処理されたら終了
+        # 2c. 検索コマンド以外、またはメンションのみの場合
+        if not question_text.strip(): # メンションのみ（フラグやコマンド除去後に空になった場合も含む）
+             # -nosrcがあってもメンションのみなら応答
+             await message.reply("…呼びましたか？", mention_author=False)
+             return
 
-    # 3. メンション応答 (検索コマンドではなかった場合)
-    if is_mention:
-        # 上記の検索コマンド処理で return されていなければ、通常のメンション応答
-        await command_handler.handle_mention(message, client.user)
-        return # メンション応答処理完了
-
-    # 4. 上記以外 (通常のメッセージなど) は無視
+        # 2d. 検索要否判断と応答 (-nosrcフラグがない場合)
+        if perform_search_assessment:
+            print(f"Assessing search necessity for mention: '{question_text[:50]}...'")
+            # search_handler に検索判断と、必要に応じた検索実行、または通常応答の呼び出しを依頼
+            await search_handler.assess_and_respond_to_mention(message, question_text)
+        else:
+            # -nosrc フラグがあったので、検索せずに通常のメンション応答
+            print("Calling handle_mention directly due to -nosrc flag.")
+            await command_handler.handle_mention(message, client.user, question_text=question_text, perform_search=False)
+        return
 
 
 # --- BOT起動 ---

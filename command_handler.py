@@ -6,7 +6,7 @@ import re
 import asyncio
 import mimetypes
 import io # PDF処理用に追加
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Literal # Literal, Unionを追加
 
 # PDF処理ライブラリをインポート (requirements.txt に pypdf2 を追加してください)
 try:
@@ -22,7 +22,7 @@ except ImportError:
 import config
 import bot_constants
 import llm_manager
-import cache_manager
+import cache_manager # ボタンコールバックでのキャッシュ操作用
 import discord_ui # ボタン生成用
 from llm_provider import ERROR_TYPE_UNKNOWN, ERROR_TYPE_INTERNAL # エラータイプ定数
 
@@ -96,20 +96,23 @@ async def execute_timer(channel: discord.TextChannel, minutes: int, prompt: str,
         timer_execution_prompt = f"「{prompt}」というリマインダーの指定時刻になりました。ユーザー ({author.display_name}) に向けて、簡潔な補足メッセージを生成してください。（現在の状況や時間帯なども少し考慮すると良いでしょう）"
         response_text = ""
         try:
-            _used_model, response_text_raw = await llm_manager.generate_response(
-                content_parts=[{'text': timer_execution_prompt}], chat_history=None, deep_cache_summary=None
-            )
+            # generate_response を直接使う代わりに lowload モデルを呼び出す
+            response_text_raw = await llm_manager.generate_lowload_response(timer_execution_prompt)
             response_text = str(response_text_raw) if response_text_raw else ""
+            if not response_text:
+                 response_text = "(補足メッセージの生成に失敗しました)" # 空の場合は補足メッセージを生成できなかった旨を示す
         except Exception as e:
              print(f"Error generating timer follow-up message: {e}")
+             # 低負荷モデル呼び出しでのエラーは None になる想定だが、念のため
              response_text = llm_handler.format_error_message(ERROR_TYPE_INTERNAL, f"Timer generation failed: {e}")
 
         full_message = base_message
         if response_text and not llm_manager.is_error_message(response_text):
             full_message += f"\n\n{response_text}"
-        elif response_text: # エラーメッセージの場合
+        # エラーメッセージの場合も短縮して表示
+        elif response_text and llm_manager.is_error_message(response_text):
              print(f"タイマー補足生成失敗: {response_text}")
-             full_message += f"\n\n({response_text[:150]})" # 短縮して表示
+             full_message += f"\n\n(補足生成エラー: {response_text[:150]})" # 短縮して表示
 
         # メッセージ送信 (2000文字制限考慮)
         try:
@@ -126,12 +129,17 @@ async def execute_timer(channel: discord.TextChannel, minutes: int, prompt: str,
 # --- コマンド処理 ---
 async def handle_command(message: discord.Message):
     """メッセージ内容を解析し、コマンドを実行する
-    注意: 検索コマンド (!src, !dsrc) は bot.py の on_message で処理される
+    注意: 検索コマンド (!src, !dsrc) は bot.py の on_message で処理される (メンション必須のため)
     """
     if not message.content: return False # コマンドなし
 
-    content_lower = message.content.lower().strip()
+    content = message.content.strip()
+    content_lower = content.lower()
     channel_id = message.channel.id
+
+    # コマンドとみなすプレフィックスは ! のみとする
+    if not content.startswith('!'):
+        return False
 
     # --- プロバイダー切り替えコマンド ---
     target_provider_name: Optional[str] = None
@@ -165,7 +173,8 @@ async def handle_command(message: discord.Message):
 
     # --- タイマーコマンド ---
     if content_lower.startswith('!timer '):
-        match = re.match(r'!timer\s+(\d+)\s*(分|分後|minute|minutes)\s*(.*)', message.content, re.IGNORECASE | re.DOTALL)
+        # content_lower ではなく元のcontentでマッチング
+        match = re.match(r'!timer\s+(\d+)\s*(分|分後|minute|minutes)\s*(.*)', content, re.IGNORECASE | re.DOTALL)
         if match:
             try:
                 minutes = int(match.group(1))
@@ -188,7 +197,8 @@ async def handle_command(message: discord.Message):
 
     # --- 投票コマンド ---
     if content_lower.startswith('!poll '):
-        args = message.content.split(' ', 1)
+        # content_lower ではなく元のcontentでスプリット
+        args = content.split(' ', 1)
         if len(args) < 2 or not args[1].strip():
             await message.reply(bot_constants.ERROR_MSG_POLL_INVALID + " 内容を指定してください。", mention_author=False); return True
         poll_content = args[1].strip()
@@ -223,43 +233,69 @@ async def handle_command(message: discord.Message):
     return False # どのコマンドにも一致しなかった
 
 # --- メンション応答処理 ---
-async def handle_mention(message: discord.Message, client_user: discord.ClientUser):
-    """メンションを受けた際の応答処理 (検索コマンドは除く)"""
+async def handle_mention(
+        message: discord.Message,
+        client_user: discord.ClientUser,
+        question_text: Optional[str] = None, # bot.pyから渡される整形済みテキスト
+        perform_search: bool = True # search_handler から呼ばれた際に False
+    ):
+    """メンションを受けた際の応答処理 (検索判断後の呼び出し、または -nosrc 指定時)"""
     llm_handler = llm_manager.get_current_provider()
     if not llm_handler:
-        # 通常、on_message側でチェックされるはずだが念のため
         print("Error: LLM Provider not available during mention handling.")
-        await message.reply(bot_constants.ERROR_MSG_INTERNAL + " (LLM Provider not available)", mention_author=False)
+        # bot.py 側で弾かれているはずだが、念のため
+        if message.guild and message.guild.me and client_user.id == message.guild.me.id: # ボット自身へのメンションか確認
+             await message.reply(bot_constants.ERROR_MSG_INTERNAL + " (LLM Provider not available)", mention_author=False)
         return
 
     channel_id = message.channel.id
     provider_name = llm_manager.get_current_provider_name()
-    print(f"Mention received in channel {channel_id}. Processing with {provider_name}...")
+    print(f"Handling mention in channel {channel_id}. (Search performed before? {'No' if not perform_search else 'Yes/Skipped'}) Processing with {provider_name}...")
 
     async with message.channel.typing():
         # 1. プロンプトと添付ファイルの準備
-        mention_strings = [f'<@!{client_user.id}>', f'<@{client_user.id}>']
-        text_content = message.content if message.content else ""
-        for mention in mention_strings: text_content = text_content.replace(mention, '')
-        text_content = text_content.strip()
+        # bot.py側で抽出・整形済みのテキストを使用 (あれば)
+        if question_text is None: # フォールバック処理 (主に旧バージョンのbot.pyとの互換性のため)
+            mention_strings = [f'<@!{client_user.id}>', f'<@{client_user.id}>']
+            text_content = message.content if message.content else ""
+            for mention in mention_strings: text_content = text_content.replace(mention, '')
+            # -nosrc と !his はここで再度除去しておく (bot.pyが除去済みでも安全のため)
+            text_content = re.sub(r'\s-nosrc\b', '', text_content, flags=re.IGNORECASE)
+            text_content = re.sub(r'\b!his\b', '', text_content, flags=re.IGNORECASE).strip()
+            print("Warning: question_text was None in handle_mention. Falling back to parsing message content.")
+        else:
+            text_content = question_text
 
-        # !his フラグのチェック
+        # !his フラグのチェック (元のメッセージ内容から判断)
         use_channel_history = False
-        if '!his' in text_content.lower():
-             # 単語として完全に一致する場合のみフラグを立てる (例: "!history" は対象外)
-             if re.search(r'\b!his\b', text_content, re.IGNORECASE):
-                 use_channel_history = True
-                 text_content = re.sub(r'\b!his\b', '', text_content, flags=re.IGNORECASE).strip()
-                 print("履歴参照フラグ (!his) 検出。キャッシュ無視。")
+        original_content_lower = message.content.lower() if message.content else ""
+        # `!his` が単語として存在するか正規表現でチェック
+        if re.search(r'\b!his\b', original_content_lower, re.IGNORECASE):
+             use_channel_history = True
+             # text_content に !his が含まれている可能性もあるので、ここでも除去
+             text_content = re.sub(r'\b!his\b', '', text_content, flags=re.IGNORECASE).strip()
+             print("履歴参照フラグ (!his) 検出。キャッシュ無視。")
 
-        # request_parts: LLM APIへの入力パーツリスト
+        # request_parts: LLM APIへの入力パーツリスト (text_content + 添付ファイル)
         request_parts: List[Dict[str, Any]] = []
         # user_entry_parts_for_cache: キャッシュ保存用のユーザー入力パーツリスト
         user_entry_parts_for_cache: List[Dict[str, Any]] = []
 
+        # テキストコンテンツを追加 (!his, -nosrc, メンションは除去済み)
         if text_content:
              request_parts.append({'text': text_content})
-             user_entry_parts_for_cache.append({'text': text_content})
+
+        # キャッシュには、メンション以外のほぼ元のユーザー入力テキストを保存したい
+        # message.content からメンションと -nosrc フラグを除去したものをキャッシュ用のテキストとする
+        cache_text_content = message.content or ""
+        mention_strings_for_cache = [f'<@!{client_user.id}>', f'<@{client_user.id}>']
+        for mention in mention_strings_for_cache:
+            cache_text_content = cache_text_content.replace(mention, '')
+        cache_text_content = re.sub(r'\s-nosrc\b', '', cache_text_content, flags=re.IGNORECASE).strip()
+
+        if cache_text_content:
+             user_entry_parts_for_cache.append({'text': cache_text_content})
+
 
         # 添付ファイル処理
         file_error_occurred_once = False
@@ -267,7 +303,8 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
         image_count = 0
         FILE_LIMIT_MB = 50
         processed_files_count = 0
-        pdf_texts_for_cache: List[str] = [] # PDFから抽出したテキストを一時保存
+        pdf_texts_for_request: List[str] = [] # PDF抽出テキスト (request用)
+        pdf_texts_for_cache: List[str] = [] # PDF抽出テキスト (cache用)
 
         if message.attachments:
             print(f"{len(message.attachments)}個の添付ファイルを検出。")
@@ -316,7 +353,7 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
                             pdf_request_text = f"--- PDFファイル '{attachment.filename}' の内容 ---\n{extracted_text}\n--- PDFファイルここまで ---"
                             request_parts.append({'text': pdf_request_text})
                             # キャッシュ保存用に抽出テキストを一時保持
-                            pdf_texts_for_cache.append(pdf_request_text)
+                            pdf_texts_for_cache.append(pdf_request_text) # キャッシュ用に追加
                             processed_files_count += 1
                             print(f"添付 '{attachment.filename}' (PDF) のテキストをリクエストに追加。({len(extracted_text)} chars)")
                         else:
@@ -332,6 +369,7 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
 
                 # --- テキストファイル処理 ---
                 elif mime_type.startswith('text/'):
+                     print(f"Processing text attachment: {attachment.filename}")
                      try:
                          file_bytes = await attachment.read()
                          # テキストファイルはデコードして text として扱う
@@ -353,7 +391,7 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
                          # request_parts とキャッシュ用リストに追加
                          text_part_content = f"--- 添付テキストファイル '{attachment.filename}' の内容 ---\n{text_content_from_file}\n--- テキストファイルここまで ---"
                          request_parts.append({'text': text_part_content})
-                         user_entry_parts_for_cache.append({'text': text_part_content})
+                         user_entry_parts_for_cache.append({'text': text_part_content}) # キャッシュ用に追加
                          processed_files_count += 1
                          print(f"添付 '{attachment.filename}' (テキスト) をリクエストとキャッシュ(予定)に追加。")
 
@@ -372,11 +410,12 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
 
 
         # PDFから抽出したテキストをキャッシュ保存用リストに追加
+        # request_partsには既に追加済み
         for pdf_text in pdf_texts_for_cache:
              user_entry_parts_for_cache.append({'text': pdf_text})
 
 
-        # 送信するテキストも有効な添付ファイルもない場合
+        # 送信するテキストコンテンツも有効な添付ファイルもない場合
         if not request_parts:
             print("応答可能なテキストコンテンツも有効な添付ファイルもありません。処理をスキップします。")
             # メンションのみの場合は何か返す
@@ -394,12 +433,27 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
             print(f"チャンネル履歴 ({config.HISTORY_LIMIT}件) 取得中...")
             try:
                 # discord.py 2.0+ では async for を使用
-                history_messages = [msg async for msg in message.channel.history(limit=config.HISTORY_LIMIT + 1)] # +1して自分を除く
+                # !his をトリガーしたメッセージ自体を含め、それ以前のメッセージを取得
+                history_messages = [msg async for msg in message.channel.history(limit=config.HISTORY_LIMIT + 1)]
                 history_messages.reverse() # 古い順に
-                history_messages = history_messages[:-1] # トリガーメッセージ（自分自身）を除く
+
+                # トリガーメッセージ（自身）を探して、それより古いものだけを使う
+                trigger_message_index = -1
+                for i, msg in enumerate(history_messages):
+                    if msg.id == message.id:
+                        trigger_message_index = i
+                        break
+                if trigger_message_index != -1:
+                    history_messages = history_messages[:trigger_message_index]
+                else:
+                    # 想定外だが、トリガーメッセージが見つからない場合は最後のメッセージを除く
+                    history_messages = history_messages[:-1]
+                    print("Warning: Trigger message not found in history fetch. Excluding last message.")
+
 
                 for msg in history_messages:
-                    role = 'model' if msg.author == client_user else 'user'
+                    # ボット自身のアカウントIDを取得する必要がある (client_user を使用)
+                    role = 'model' if msg.author.id == client_user.id else 'user'
                     msg_parts = []
                     txt = msg.content or ""
                     # 履歴内の添付ファイルはテキストで示す (簡略化)
@@ -425,13 +479,15 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
         if deep_cache_summary: print("Deep Cache情報を読み込みました。")
 
         # 4. LLM API呼び出し (llm_manager経由)
+        # ここでは検索を行わず、直接応答を生成
+        # Deep Cache は llm_manager.generate_response 内で最初のユーザーメッセージに付加される
         used_model_name, response_text_raw = await llm_manager.generate_response(
             content_parts=request_parts, # LLMには画像バイナリとテキスト(PDF含む)を渡す
-            chat_history=chat_history,
-            deep_cache_summary=deep_cache_summary
+            chat_history=chat_history, # 過去の会話履歴 (リスト形式)
+            deep_cache_summary=deep_cache_summary # Deep Cache サマリー
         )
         response_text = str(response_text_raw) if response_text_raw else ""
-        print(f"LLM ({provider_name} - {used_model_name}) response received.")
+        print(f"LLM ({provider_name} - {used_model_name}) response received (no search).")
 
         # 5. 応答送信
         sent_message: Optional[discord.Message] = None # 送信したメッセージオブジェクトを保持
@@ -470,17 +526,21 @@ async def handle_mention(message: discord.Message, client_user: discord.ClientUs
             err_msg = llm_handler.format_error_message(ERROR_TYPE_UNKNOWN, "Empty response from API.") if llm_handler else bot_constants.ERROR_MSG_GEMINI_UNKNOWN
             sent_message = await message.reply(err_msg, mention_author=False)
 
+
         # 6. キャッシュ更新 (エラーでなく、履歴モードでない場合)
         # user_entry_parts_for_cache には、元のテキストメッセージ、画像等のinline_data(bytes)、PDF等の抽出テキストが含まれる
+        # !his モードの場合はキャッシュを更新しない
         if not is_error_response and not use_channel_history and user_entry_parts_for_cache:
-            # キャッシュに Deep Cache summary は含めない
+            # Deep Cache summary はキャッシュ(履歴)には含めない
             current_history = chat_history + [{'role': 'user', 'parts': user_entry_parts_for_cache}]
             if response_text: # response_text が None でないことを確認
                 current_history.append({'role': 'model', 'parts': [{'text': response_text}]}) # 全文を保存
             await cache_manager.save_cache(channel_id, current_history)
-            print("Cache updated.")
+            print("Cache updated (no search response).")
         elif not user_entry_parts_for_cache:
              print("Skipping cache update because user entry parts are empty.")
+        elif use_channel_history:
+             print("Skipping cache update because !his flag was used.")
 
 
         # 7. 追跡質問ボタン生成 (エラーでなく、メッセージ送信成功時)
