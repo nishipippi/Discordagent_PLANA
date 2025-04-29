@@ -188,6 +188,7 @@ async def should_perform_search(question: str) -> bool:
     try:
         assessment_prompt = config.SEARCH_NECESSITY_ASSESSMENT_PROMPT.format(question=question)
         # Lowload モデルを使用
+        # search_handler.py での generate_lowload_response にはタイムアウトはまだ渡さない (llm_manager側で設定)
         assessment_response_raw = await llm_manager.generate_lowload_response(assessment_prompt)
         # ここで低負荷LLMコールが発生するが、assess_and_respond_to_mention のカウンターでは追跡しない
         assessment_response = str(assessment_response_raw).strip().lower() if assessment_response_raw else ""
@@ -250,15 +251,18 @@ async def generate_dsrc_plan(question: str) -> Optional[Tuple[List[str], int]]:
         question=question, max_steps=config.DSRC_MAX_PLAN_STEPS
     )
     try:
+        # generate_response には gemini_provider.py でデフォルトのタイムアウトが設定されている
         _used_model, plan_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': plan_prompt}], chat_history=None, deep_cache_summary=None
         )
         llm_calls += 1 # LLMコールをカウント
         plan_response = str(plan_response_raw).strip() if plan_response_raw else ""
 
-        if not plan_response or llm_manager.is_error_message(plan_response):
+        # LLMからの応答がエラーメッセージかどうか判定
+        if llm_manager.is_error_message(plan_response):
             print(f"DSRC Plan generation failed. Response: {plan_response}")
-            return None # エラー時はNoneだけ返す
+            # エラーメッセージ文字列を返すのではなく、Noneを返すことで失敗を示す
+            return None
 
         plan_steps_raw = [line.strip() for line in plan_response.splitlines() if line.strip()]
         plan_steps = [re.sub(r"^\s*\d+\.\s*", "", step) for step in plan_steps_raw] # 先頭の空白と番号を除去
@@ -294,15 +298,18 @@ async def assess_dsrc_step_results(question: str, step_description: str, search_
         search_results_text=search_results_text
     )
     try:
+        # generate_response には gemini_provider.py でデフォルトのタイムアウトが設定されている
         _used_model, assessment_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': assessment_prompt}], chat_history=None, deep_cache_summary=None
         )
         llm_calls += 1 # LLMコールをカウント
         assessment_response = str(assessment_response_raw).strip() if assessment_response_raw else ""
 
-        if not assessment_response or llm_manager.is_error_message(assessment_response):
-            print(f"DSRC Step assessment failed. Response: {assessment_response}")
-            return "ERROR", f"Assessment failed: {assessment_response}", llm_calls
+        # LLMからの応答がエラーメッセージかどうか判定
+        if llm_manager.is_error_message(assessment_response):
+             print(f"DSRC Step assessment failed. Response: {assessment_response}")
+             return "ERROR", f"Assessment failed: {assessment_response}", llm_calls
+
 
         # 大文字小文字を区別しないように upper() してから比較
         if assessment_response.upper() == 'COMPLETE':
@@ -358,12 +365,13 @@ async def execute_dsrc_step(
         )
         current_iteration_queries = [] # このイテレーションで使うクエリ
         try:
+            # generate_response には gemini_provider.py でデフォルトのタイムアウトが設定されている
             _used_model_q, query_response_raw = await llm_manager.generate_response(
                  content_parts=[{'text': query_gen_prompt}], chat_history=None, deep_cache_summary=None
             )
             step_llm_calls += 1 # LLMコールをカウント
             query_response_text = str(query_response_raw).strip() if query_response_raw else ""
-            if not query_response_text or llm_manager.is_error_message(query_response_text):
+            if llm_manager.is_error_message(query_response_text): # LLMからの応答がエラーメッセージかどうか判定
                  print(f"[{iteration_label}] Query generation failed. Response: {query_response_text}")
                  # クエリ生成失敗はステップ続行不可とみなし、エラーとして終了
                  step_assessments.append({"step": step_index + 1, "iteration": iteration + 1, "status": "ERROR", "reason": f"Query generation failed: {query_response_text}", "queries": [], "results": {}})
@@ -403,11 +411,11 @@ async def execute_dsrc_step(
                   # is_cached = await search_cache.exists(cache_key) # キャッシュ存在確認
                   # if not is_cached:
                   #     step_brave_calls += 1 # キャッシュがなければカウント (APIが呼ばれるはず)
-                  # --- asyncio-cache 0.x では exists が非同期でない & 確実にAPIコール発生を捉えるのが難しい ---
                   # --- シンプルにするため、呼び出しごとにカウントする（キャッシュヒット含むと注記） ---
                   step_brave_calls += 1 # Braveコールをカウント
                   results = await call_brave_search_api(query)
                   if results: search_results_api.extend(results)
+                 # call_brave_search_api 内で遅延
 
              unique_urls = list(dict.fromkeys([r['url'] for r in search_results_api if 'url' in r]))
              # このステップの今回のイテレーションでまだ取得していないURL、かつ全ステップでもまだ取得していないURL
@@ -494,10 +502,12 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
     report_input_results_text = combined_search_results_text # デフォルトは元のテキスト
     report_input_source = "full results" # レポート入力が元の結果か要約かを示すラベル
     source_urls_list = list(all_step_results.keys()) # 元のURLリストは常に保持
+    summarization_needed = False
 
     # 設定された最大入力文字数を超えているかチェック
     if len(combined_search_results_text) > config.MAX_INPUT_CHARS_FOR_SUMMARY:
         print(f"DSRC report input (all_results_text) length ({len(combined_search_results_text)}) exceeds summary limit ({config.MAX_INPUT_CHARS_FOR_SUMMARY}). Attempting to summarize using lowload model.")
+        summarization_needed = True
 
         if lowload_model_name:
             await discord_ui.update_thinking_message(discord.utils.MISSING, f"…考え中... (検索結果を要約中 using {lowload_model_name})")
@@ -507,20 +517,27 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
             )
             try:
                 # Lowload モデルで要約を試みる
-                summarized_results_raw = await llm_manager.generate_lowload_response(summarize_prompt)
-                llm_calls += 1 # 低負荷LLMコールをカウント
-                summarized_results_text = str(summarized_results_raw).strip() if summarized_results_raw else ""
-
-                # 要約が成功し、エラーメッセージでないか、および「要約できませんでした」でないかチェック
-                if summarized_results_text and not llm_manager.is_error_message(summarized_results_text) and "要約できませんでした。" not in summarized_results_text:
-                    print(f"Successfully summarized search results ({len(summarized_results_text)} chars).")
-                    report_input_results_text = f"【収集された検索結果の要約】\n{summarized_results_text}" # 要約であることを明記
-                    report_input_source = "summarized results"
-                else:
-                    print(f"Lowload model failed to summarize search results. Response: {summarized_results_text}. Using truncated full results.")
-                    # 要約失敗時は、元のテキストを強制的に切り詰めて使用
-                    report_input_results_text = combined_search_results_text[:config.MAX_INPUT_CHARS_FOR_SUMMARY] + "\n\n... (Full results truncated for report generation due to length or summary failure)"
-                    report_input_source = "truncated full results"
+                # *** 修正箇所: generate_lowload_response 呼び出しから timeout を削除 (前回の修正済み) ***
+                # llm_manager.generate_lowload_response 関数に timeout 引数は渡せなくなっています。
+                summarized_results_raw = await llm_manager.generate_lowload_response(summarize_prompt) # timeout 引数を削除
+                # generate_lowload_response が None を返すのはエラー時と想定
+                if summarized_results_raw is not None:
+                    summarized_results_text = str(summarized_results_raw).strip()
+                    # 要約が成功し、エラーメッセージでないか、および「要約できませんでした」でないかチェック
+                    if summarized_results_text and not llm_manager.is_error_message(summarized_results_text) and "要約できませんでした。" not in summarized_results_text:
+                        print(f"Successfully summarized search results ({len(summarized_results_text)} chars).")
+                        report_input_results_text = f"【収集された検索結果の要約】\n{summarized_results_text}" # 要約であることを明記
+                        report_input_source = "summarized results"
+                    else:
+                        print(f"Lowload model failed to generate valid summary. Response: {summarized_results_text}. Using truncated full results.")
+                        # 要約失敗時は、元のテキストを強制的に切り詰めて使用
+                        report_input_results_text = combined_search_results_text[:config.MAX_INPUT_CHARS_FOR_SUMMARY] + "\n\n... (Full results truncated for report generation due to invalid summary)"
+                        report_input_source = "truncated full results (invalid summary)"
+                else: # summarized_results_raw が None だった場合
+                     print("Lowload model failed to summarize search results (returned None). Using truncated full results.")
+                     # 要約失敗時は、元のテキストを強制的に切り詰めて使用
+                     report_input_results_text = combined_search_results_text[:config.MAX_INPUT_CHARS_FOR_SUMMARY] + "\n\n... (Full results truncated for report generation due to summarization failure)"
+                     report_input_source = "truncated full results (summarization failure)"
 
             except Exception as e:
                 print(f"Error during search results summarization: {e}. Using truncated full results.")
@@ -529,11 +546,21 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
                 # 要約中に例外発生時も、元のテキストを強制的に切り詰めて使用
                 report_input_results_text = combined_search_results_text[:config.MAX_INPUT_CHARS_FOR_SUMMARY] + "\n\n... (Full results truncated for report generation due to exception)"
                 report_input_source = "truncated full results (exception)"
+            finally:
+                # 要約試行回数に関わらずLLMコールは1回とカウント (generate_lowload_response内でカウントされるかはllm_manager実装による)
+                # ここでは llm_manager.generate_lowload_response 内でカウントされることを期待し、ここではカウントしない
+                pass # generate_lowload_response 自体は内部でLLMを呼ぶため、llm_manager側でカウントされるべき
+
+
         else:
              print("Lowload model not available for summarization. Using truncated full results.")
              # Lowload モデルがない場合も、元のテキストを強制的に切り詰めて使用
              report_input_results_text = combined_search_results_text[:config.MAX_INPUT_CHARS_FOR_SUMMARY] + "\n\n... (Full results truncated for report generation, lowload model unavailable)"
              report_input_source = "truncated full results (lowload missing)"
+    else:
+        print(f"DSRC report input length ({len(combined_search_results_text)}) is within summary limit. Skipping summarization.")
+        report_input_source = "full results (within limit)"
+
 
     # --- 全評価結果テキスト ---
     assessments_summary_lines = []
@@ -547,7 +574,11 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
          # results はテキスト量が多いので省略するか、URLだけリストアップ
          # results が None でないことを確認
          if assessment.get('results') is not None:
-              line += f", New Results URLs={list(assessment['results'].keys())}"
+              # iteration ごとに取得した新しい結果のURLをリストアップ
+              new_result_urls = list(assessment['results'].keys())
+              if new_result_urls:
+                   line += f", New Results URLs={new_result_urls}"
+
          assessments_summary_lines.append(line)
     all_assessments_text = "\n".join(assessments_summary_lines)
 
@@ -563,13 +594,15 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
     try:
         await discord_ui.update_thinking_message(discord.utils.MISSING, f"…考え中... (最終レポート生成中 using {primary_model_name}, input: {report_input_source})")
         # Primary モデルでレポート生成
+        # generate_response には gemini_provider.py でデフォルトのタイムアウト(120秒)が設定されている
         _used_model, report_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': report_prompt}], chat_history=None, deep_cache_summary=None
         )
         llm_calls += 1 # Primary LLMコールをカウント
         report_response = str(report_response_raw).strip() if report_response_raw else ""
 
-        if not report_response or llm_manager.is_error_message(report_response):
+        # LLMからの応答がエラーメッセージかどうか判定
+        if llm_manager.is_error_message(report_response):
             print(f"DSRC Report generation failed. Response: {report_response}")
             # レポート生成失敗時は、エラーメッセージを返す
             return f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成失敗)\nReason: {report_response}", llm_calls
@@ -658,17 +691,22 @@ async def handle_search_command(
 
             # 1. クエリ生成 (Lowloadモデルを使用)
             query_gen_prompt = config.SEARCH_QUERY_GENERATION_PROMPT.format(question=original_question)
-            # generate_lowload_response を使用
+            # generate_lowload_response を使用 (search_handler.py ではタイムアウトを渡さない方針)
             query_response_raw = await llm_manager.generate_lowload_response(query_gen_prompt)
-            total_llm_calls += 1 # カウント
-            query_response_text = str(query_response_raw).strip() if query_response_raw else ""
-            if not query_response_text or llm_manager.is_error_message(query_response_text):
+            # generate_lowload_response が None を返すのはエラー時と想定
+            if query_response_raw is None:
                  await discord_ui.delete_thinking_message(); await message.reply("検索クエリ生成失敗。", mention_author=False); return
+
+            query_response_text = str(query_response_raw).strip()
+            if llm_manager.is_error_message(query_response_text): # LLMからの応答がエラーメッセージかどうか判定
+                 await discord_ui.delete_thinking_message(); await message.reply(f"検索クエリ生成失敗: {query_response_text}", mention_author=False); return
 
             queries_raw = query_response_text.replace('\n', ',')
             search_queries = [q.strip().strip('"') for q in queries_raw.split(',') if q.strip()][:3]
             if not search_queries: await discord_ui.delete_thinking_message(); await message.reply("有効な検索クエリ生成失敗。", mention_author=False); return
             print(f"[{search_source}] Generated queries: {search_queries}")
+            total_llm_calls += 1 # クエリ生成LLMコールをカウント (generate_lowload_response内でカウントされるかはllm_manager実装によるが、ここでは確実にカウント)
+
 
             # 2. Brave Search & 内容取得
             search_results_api: List[Dict[str, Any]] = []
@@ -697,13 +735,18 @@ async def handle_search_command(
                  combined_results_text_for_llm = combined_results_text_for_llm[:config.MAX_TOTAL_SEARCH_CONTENT_LENGTH] + "...(truncated)"
 
             answer_prompt = config.SIMPLE_SEARCH_ANSWER_PROMPT.format(question=original_question, search_results_text=combined_results_text_for_llm)
-            # generate_lowload_response を使用
+            # generate_lowload_response を使用 (search_handler.py ではタイムアウトを渡さない方針)
             final_response_raw = await llm_manager.generate_lowload_response(answer_prompt) # Lowloadモデル
-            total_llm_calls += 1 # カウント
-            final_response_text = str(final_response_raw).strip() if final_response_raw else ""
+            # generate_lowload_response が None を返すのはエラー時と想定
+            if final_response_raw is None:
+                 await discord_ui.delete_thinking_message(); await message.reply("応答生成失敗。", mention_author=False); return
 
-            if not final_response_text or llm_manager.is_error_message(final_response_text):
+            final_response_text = str(final_response_raw).strip()
+            if llm_manager.is_error_message(final_response_text): # LLMからの応答がエラーメッセージかどうか判定
                  await discord_ui.delete_thinking_message(); await message.reply(f"応答生成失敗: {final_response_text}", mention_author=False); return
+
+            total_llm_calls += 1 # 最終応答生成LLMコールをカウント (generate_lowload_response内でカウントされるかはllm_manager実装によるが、ここでは確実にカウント)
+
 
             # response_header は後で設定
 
@@ -718,8 +761,11 @@ async def handle_search_command(
 
             # 1. 計画生成
             await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} 調査計画生成中 ({primary_model_name})")
+            # generate_dsrc_plan 内で generate_response が呼ばれる。generate_response には gemini_provider.py でデフォルトのタイムアウトが設定されている。
             plan_result = await generate_dsrc_plan(original_question)
-            if not plan_result: await discord_ui.delete_thinking_message(); await message.reply("調査計画の生成に失敗しました。", mention_author=False); return
+            if not plan_result: # generate_dsrc_plan が None を返すのはエラー時と想定
+                 await discord_ui.delete_thinking_message(); await message.reply("調査計画の生成に失敗しました。", mention_author=False); return
+
             plan, plan_llm_calls = plan_result
             total_llm_calls += plan_llm_calls # カウント加算
             print(f"[{search_source}] Generated Plan: {plan}")
@@ -727,9 +773,10 @@ async def handle_search_command(
             # 2. 各ステップ実行
             for i, step_description in enumerate(plan):
                 print(f"--- Executing DSRC Step {i+1}: {step_description} ---")
-                await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} ステップ {i+1}/{len(plan)} 実行中: {step_description[:30]}...")
+                await discord_ui.update_thinking_message(discord.utils.MISSING, f"{thinking_msg_prefix} ステップ {i+1}/{len(plan)} 実行中: {step_description[:30]}...")
 
                 # execute_dsrc_step を呼び出し、返り値からカウントを取得
+                # execute_dsrc_step 内で generate_response が呼ばれる。generate_response には gemini_provider.py でデフォルトのタイムアウトが設定されている。
                 step_results, step_assessments, step_llm, step_brave = await execute_dsrc_step(
                     original_question, step_description, i, all_extracted_content
                 )
@@ -739,12 +786,13 @@ async def handle_search_command(
                 all_assessments.extend(step_assessments)
 
                 # ステップ実行中にエラーが発生した場合 (assessment の status が ERROR)
-                if any(a['status'] == 'ERROR' for a in step_assessments if a.get('step') == i+1): # このステップのエラーのみチェック
+                # all_assessments のうち、現在のステップに該当するものだけチェック
+                if any(a.get('status') == 'ERROR' for a in step_assessments if a.get('step') == i+1):
                      print(f"Error occurred during Step {i+1}. Stopping DSRC process.")
                      await discord_ui.delete_thinking_message()
                      error_reason = "Unknown error"
                      # このステップのassessmentからエラー理由を探す
-                     for a in all_assessments: # 全体評価リストから探す
+                     for a in step_assessments: # このステップの評価リストから探す
                          if a.get('step') == i+1 and a.get('status') == 'ERROR': error_reason = a.get('reason', 'Unknown error'); break
                      await message.reply(f"詳細検索ステップ {i+1} でエラーが発生したため処理を中断しました。\n理由: {error_reason}", mention_author=False)
                      return # 早期リターン
@@ -756,8 +804,10 @@ async def handle_search_command(
             if not all_extracted_content:
                  await discord_ui.delete_thinking_message(); await message.reply("詳細検索の結果、有効な情報が見つかりませんでした。", mention_author=False); return
 
+            # generate_dsrc_report には generate_response (Primaryモデル, デフォルトタイムアウト) と generate_lowload_response (Lowloadモデル, 要約用タイムアウト) が含まれる
             report_result = await generate_dsrc_report(original_question, plan, all_extracted_content, all_assessments)
-            if not report_result: # レポート生成自体がNoneを返した場合 (非常に稀な内部エラー)
+
+            if report_result is None: # generate_dsrc_report が None を返した場合 (非常に稀な内部エラー)
                 await discord_ui.delete_thinking_message(); await message.reply(f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成プロセスで予期せぬエラー)", mention_author=False); return
 
             report_text, report_llm_calls = report_result
@@ -787,12 +837,7 @@ async def handle_search_command(
         full_response = response_header + final_response_text
 
         # ソースリストのフォールバック (generate_dsrc_report内で処理済み)
-        # source_header = "**参照ソース:**"
-        # if source_header.lower() not in full_response.lower() and all_extracted_content:
-        #      print(f"[{search_source}] LLM did not include sources. Appending manually.")
-        #      source_list = "\n".join([f"- <{url}>" for url in all_extracted_content.keys()])
-        #      full_response += f"\n\n{source_header}\n{source_list}"
-
+        # ...
 
         # 応答メッセージ分割送信 (message.reply を使用)
         if len(full_response) > 2000:
