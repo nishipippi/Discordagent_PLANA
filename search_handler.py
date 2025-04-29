@@ -8,6 +8,10 @@ import discord
 import json # DSRCレポート生成で使う可能性 (今回はテキスト化だが将来的に構造化データも考慮)
 from typing import List, Dict, Any, Optional, Tuple, Literal, Union # Unionを追加
 
+# aiocache をインポート
+from aiocache import cached, Cache
+# グローバル設定は削除
+
 import config
 import bot_constants
 import llm_manager
@@ -24,8 +28,12 @@ import command_handler as ch # <- エイリアスを使用してインポート
 
 
 # --- Brave Search API Call ---
+# @cached デコレータを追加
+# エラー修正: キャッシュタイプとTTLをキーワード引数として指定
+@cached(cache=Cache.MEMORY, ttl=300, key_builder=lambda f, query: query)
 async def call_brave_search_api(query: str) -> Optional[List[Dict[str, Any]]]:
-    """Brave Search APIを呼び出す"""
+    """Brave Search APIを呼び出す (キャッシュ対応)"""
+    # --- 関数の中身は変更なし ---
     if not config.BRAVE_SEARCH_API_KEY:
         print("Error: BRAVE_SEARCH_API_KEY is not set.")
         return None
@@ -46,6 +54,7 @@ async def call_brave_search_api(query: str) -> Optional[List[Dict[str, Any]]]:
 
     async with httpx.AsyncClient() as client:
         try:
+            # キャッシュされていない場合のみAPIコールが発生
             print(f"Calling Brave Search API for query: '{query}'...")
             response = await client.get(config.BRAVE_SEARCH_API_URL, headers=headers, params=params, timeout=20)
             response.raise_for_status()
@@ -64,7 +73,8 @@ async def call_brave_search_api(query: str) -> Optional[List[Dict[str, Any]]]:
             print(f"An unexpected error occurred during Brave Search API call: {e}")
             return None
         finally:
-            # API呼び出しごとに必ず待機 (try/except/finallyで保証)
+            # API呼び出しごとに必ず待機 (キャッシュヒット時も待機してしまうが、大きな問題はない)
+            # 頻繁なキャッシュヒットが予想される場合は、キャッシュヒット時には待機しない工夫も可能
             await asyncio.sleep(config.BRAVE_API_DELAY)
 
 
@@ -179,6 +189,7 @@ async def should_perform_search(question: str) -> bool:
         assessment_prompt = config.SEARCH_NECESSITY_ASSESSMENT_PROMPT.format(question=question)
         # Lowload モデルを使用
         assessment_response_raw = await llm_manager.generate_lowload_response(assessment_prompt)
+        # ここで低負荷LLMコールが発生するが、assess_and_respond_to_mention のカウンターでは追跡しない
         assessment_response = str(assessment_response_raw).strip().lower() if assessment_response_raw else ""
 
         print(f"Search necessity assessment for '{question[:50]}...': Response='{assessment_response}'")
@@ -202,7 +213,7 @@ async def assess_and_respond_to_mention(message: discord.Message, question_text:
     # メッセージオブジェクトがあるため、Thinkingメッセージのチャンネルは明示的に渡せる
     await discord_ui.update_thinking_message(message.channel, "…検索が必要か判断中...")
 
-    needs_search = await should_perform_search(question_text)
+    needs_search = await should_perform_search(question_text) # LLMコール発生の可能性あり
 
     if needs_search:
         print("Search deemed necessary by LLM. Performing simple search (!src equivalent).")
@@ -217,7 +228,6 @@ async def assess_and_respond_to_mention(message: discord.Message, question_text:
         # 通常のメンション応答 (検索なし)
         # message.guild.me が None でないことを確認してから渡す
         if message.guild and message.guild.me:
-             # command_handler エイリアスを使用して handle_mention を呼び出し
              await ch.handle_mention(message, message.guild.me, question_text=question_text, perform_search=False)
         else:
              print("Error: Cannot get bot user info (message.guild.me) in assess_and_respond_to_mention.")
@@ -226,56 +236,57 @@ async def assess_and_respond_to_mention(message: discord.Message, question_text:
 
 # --- Deep Search (!dsrc) Core Logic ---
 
-async def generate_dsrc_plan(question: str) -> Optional[List[str]]:
+# 戻り値にLLMコール数を追加 -> Optional[Tuple[List[str], int]]
+async def generate_dsrc_plan(question: str) -> Optional[Tuple[List[str], int]]:
     """!dsrc のための調査計画を生成する"""
+    llm_calls = 0
     llm_handler = llm_manager.get_current_provider()
     primary_model_name = llm_manager.get_active_model_name('primary')
     if not llm_handler or not primary_model_name:
         print("Error: Primary model unavailable for DSRC plan generation.")
-        return None
+        return None # エラー時はNoneだけ返す (コール数は不明)
 
     plan_prompt = config.DSRC_PLAN_GENERATION_PROMPT.format(
         question=question, max_steps=config.DSRC_MAX_PLAN_STEPS
     )
     try:
-        # generate_response はモデル名と応答テキストのタプルを返す (Primaryモデルを使用)
         _used_model, plan_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': plan_prompt}], chat_history=None, deep_cache_summary=None
         )
+        llm_calls += 1 # LLMコールをカウント
         plan_response = str(plan_response_raw).strip() if plan_response_raw else ""
 
         if not plan_response or llm_manager.is_error_message(plan_response):
             print(f"DSRC Plan generation failed. Response: {plan_response}")
-            return None
+            return None # エラー時はNoneだけ返す
 
-        # 番号付きリストをパース (簡易的)
         plan_steps_raw = [line.strip() for line in plan_response.splitlines() if line.strip()]
-        # 番号を除去 (例: "1. ", "2. ")
         plan_steps = [re.sub(r"^\s*\d+\.\s*", "", step) for step in plan_steps_raw] # 先頭の空白と番号を除去
         plan_steps = [step for step in plan_steps if step] # 空のステップを除去
 
         if not plan_steps:
              print("DSRC Plan generation resulted in empty steps.")
-             return None
+             return None # エラー時はNoneだけ返す
 
         print(f"DSRC Plan Generated ({len(plan_steps)} steps):")
         for i, step in enumerate(plan_steps): print(f"  {i+1}. {step}")
-        return plan_steps[:config.DSRC_MAX_PLAN_STEPS] # 最大ステップ数に制限
+        return plan_steps[:config.DSRC_MAX_PLAN_STEPS], llm_calls # 成功時はプランとコール数を返す
 
     except Exception as e:
         print(f"Error during DSRC plan generation: {e}")
         import traceback
         traceback.print_exc()
-        return None
+        return None # 例外時もNoneだけ返す
 
-
-async def assess_dsrc_step_results(question: str, step_description: str, search_results_text: str) -> Tuple[str, Optional[str]]:
+# 戻り値にLLMコール数を追加 -> Tuple[str, Optional[str], int]
+async def assess_dsrc_step_results(question: str, step_description: str, search_results_text: str) -> Tuple[str, Optional[str], int]:
     """!dsrc の特定のステップの結果を評価する"""
+    llm_calls = 0
     llm_handler = llm_manager.get_current_provider()
     primary_model_name = llm_manager.get_active_model_name('primary')
     if not llm_handler or not primary_model_name:
         print("Error: Primary model unavailable for DSRC step assessment.")
-        return "ERROR", "Primary model unavailable."
+        return "ERROR", "Primary model unavailable.", llm_calls
 
     assessment_prompt = config.DSRC_STEP_ASSESSMENT_PROMPT.format(
         question=question,
@@ -283,46 +294,50 @@ async def assess_dsrc_step_results(question: str, step_description: str, search_
         search_results_text=search_results_text
     )
     try:
-        # generate_response はモデル名と応答テキストのタプルを返す (Primaryモデルを使用)
         _used_model, assessment_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': assessment_prompt}], chat_history=None, deep_cache_summary=None
         )
+        llm_calls += 1 # LLMコールをカウント
         assessment_response = str(assessment_response_raw).strip() if assessment_response_raw else ""
 
         if not assessment_response or llm_manager.is_error_message(assessment_response):
             print(f"DSRC Step assessment failed. Response: {assessment_response}")
-            return "ERROR", f"Assessment failed: {assessment_response}"
+            return "ERROR", f"Assessment failed: {assessment_response}", llm_calls
 
         # 大文字小文字を区別しないように upper() してから比較
         if assessment_response.upper() == 'COMPLETE':
-            return "COMPLETE", None
+            return "COMPLETE", None, llm_calls
         elif assessment_response.upper().startswith('INCOMPLETE:'):
             missing_info = assessment_response.split(':', 1)[1].strip() if ':' in assessment_response else "詳細不明"
-            return "INCOMPLETE", missing_info
+            return "INCOMPLETE", missing_info, llm_calls
         else:
             # 予期せぬ形式 -> 不完全とみなし、応答内容を不足情報とする
             print(f"Warning: Unexpected DSRC step assessment format: '{assessment_response}'. Treating as INCOMPLETE.")
-            return "INCOMPLETE", assessment_response
+            return "INCOMPLETE", assessment_response, llm_calls
 
     except Exception as e:
         print(f"Error during DSRC step assessment: {e}")
         import traceback
         traceback.print_exc()
-        return "ERROR", f"Exception during assessment: {e}"
+        return "ERROR", f"Exception during assessment: {e}", llm_calls
 
-
+# 戻り値にLLMとBraveのコール数を追加 -> Tuple[Dict[str, str], List[Dict[str, Any]], int, int]
 async def execute_dsrc_step(
     question: str,
     step_description: str,
     step_index: int,
-    all_results_so_far: Dict[str, str] # これまでの全ステップで集めた結果
-    ) -> Tuple[Dict[str, str], List[Dict[str, Any]]]:
+    all_results_so_far: Dict[str, str]
+    ) -> Tuple[Dict[str, str], List[Dict[str, Any]], int, int]: # llm_calls, brave_calls を返す
     """!dsrc の1ステップを実行 (最大N回の検索・評価サイクル)"""
+    step_llm_calls = 0
+    step_brave_calls = 0
     llm_handler = llm_manager.get_current_provider()
     primary_model_name = llm_manager.get_active_model_name('primary')
     if not llm_handler or not primary_model_name:
         print(f"Error executing DSRC Step {step_index+1}: Primary model unavailable.")
-        return {}, [{"step": step_index + 1, "status": "ERROR", "reason": "Primary model unavailable", "queries": [], "results": {}}]
+        # assessments にエラー情報を追加して返す
+        assessments = [{"step": step_index + 1, "status": "ERROR", "reason": "Primary model unavailable", "queries": [], "results": {}}]
+        return {}, assessments, step_llm_calls, step_brave_calls
 
     step_results: Dict[str, str] = {} # このステップで新たに見つかった結果 (URL -> text)
     step_assessments: List[Dict[str, Any]] = [] # このステップの評価履歴
@@ -341,22 +356,22 @@ async def execute_dsrc_step(
             used_queries_for_step=", ".join(used_queries_for_step) or "なし",
             missing_info=missing_info if missing_info else "特に指定なし" # Noneの場合はデフォルト文字列
         )
+        current_iteration_queries = [] # このイテレーションで使うクエリ
         try:
-            # generate_response はモデル名と応答テキストのタプルを返す (Primaryモデルを使用)
             _used_model_q, query_response_raw = await llm_manager.generate_response(
                  content_parts=[{'text': query_gen_prompt}], chat_history=None, deep_cache_summary=None
             )
+            step_llm_calls += 1 # LLMコールをカウント
             query_response_text = str(query_response_raw).strip() if query_response_raw else ""
             if not query_response_text or llm_manager.is_error_message(query_response_text):
                  print(f"[{iteration_label}] Query generation failed. Response: {query_response_text}")
                  # クエリ生成失敗はステップ続行不可とみなし、エラーとして終了
                  step_assessments.append({"step": step_index + 1, "iteration": iteration + 1, "status": "ERROR", "reason": f"Query generation failed: {query_response_text}", "queries": [], "results": {}})
-                 return step_results, step_assessments # ステップ失敗で終了
+                 return step_results, step_assessments, step_llm_calls, step_brave_calls # 失敗時は現在のカウントで終了
 
             queries_raw = query_response_text.replace('\n', ',')
-            current_iteration_queries = [q.strip().strip('"') for q in queries_raw.split(',') if q.strip()]
+            current_iteration_queries = [q.strip().strip('"') for q in queries_raw.split(',') if q.strip()][:3]
             current_iteration_queries = [q for q in current_iteration_queries if q]
-            current_iteration_queries = current_iteration_queries[:3] # 最大3つ
 
             if not current_iteration_queries:
                  print(f"[{iteration_label}] Generated empty query list. Proceeding to assessment with existing results.")
@@ -374,7 +389,7 @@ async def execute_dsrc_step(
             import traceback
             traceback.print_exc()
             step_assessments.append({"step": step_index + 1, "iteration": iteration + 1, "status": "ERROR", "reason": f"Query generation exception: {e}", "queries": [], "results": {}})
-            return step_results, step_assessments # ステップ失敗で終了
+            return step_results, step_assessments, step_llm_calls, step_brave_calls # 失敗時は現在のカウントで終了
 
 
         # 2. Brave Search & 内容取得
@@ -383,6 +398,14 @@ async def execute_dsrc_step(
              search_results_api: List[Dict[str, Any]] = []
              for query in current_iteration_queries:
                   await discord_ui.update_thinking_message(discord.utils.MISSING, f"…考え中... ({iteration_label} 検索中: `{query[:30]}...`)")
+                  # --- call_brave_search_api 呼び出し前にキャッシュ確認 ---
+                  # cache_key = query # key_builderと同じロジック
+                  # is_cached = await search_cache.exists(cache_key) # キャッシュ存在確認
+                  # if not is_cached:
+                  #     step_brave_calls += 1 # キャッシュがなければカウント (APIが呼ばれるはず)
+                  # --- asyncio-cache 0.x では exists が非同期でない & 確実にAPIコール発生を捉えるのが難しい ---
+                  # --- シンプルにするため、呼び出しごとにカウントする（キャッシュヒット含むと注記） ---
+                  step_brave_calls += 1 # Braveコールをカウント
                   results = await call_brave_search_api(query)
                   if results: search_results_api.extend(results)
 
@@ -402,7 +425,6 @@ async def execute_dsrc_step(
              else:
                  print(f"[{iteration_label}] No new unique URLs to fetch in this iteration.")
 
-
         # 3. 評価
         await discord_ui.update_thinking_message(discord.utils.MISSING, f"…考え中... ({iteration_label} 結果評価中)")
         # このステップで集めた全結果（過去のイテレーション含む）で評価
@@ -414,7 +436,9 @@ async def execute_dsrc_step(
         if len(combined_step_results_text) > config.MAX_TOTAL_SEARCH_CONTENT_LENGTH:
             combined_step_results_text = combined_step_results_text[:config.MAX_TOTAL_SEARCH_CONTENT_LENGTH] + "\n\n... (truncated for assessment)"
 
-        status, assessment_detail = await assess_dsrc_step_results(question, step_description, combined_step_results_text)
+        # assess_dsrc_step_results を呼び出し、返り値から LLM コール数を取得
+        status, assessment_detail, assessment_llm_calls = await assess_dsrc_step_results(question, step_description, combined_step_results_text)
+        step_llm_calls += assessment_llm_calls # ステップ全体のLLMコール数に加算
 
         # 評価結果を記録
         step_assessments.append({
@@ -423,39 +447,41 @@ async def execute_dsrc_step(
             "status": status,
             "reason": assessment_detail,
             "queries": current_iteration_queries, # このイテレーションで使ったクエリ
-            "results": current_iteration_extracted # このイテレーションで取得した新しい結果
+            "results": current_iteration_extracted, # このイテレーションで取得した新しい結果
+            "brave_calls": len(current_iteration_queries) # このイテレーションでのBraveコール数 (クエリ数に等しい)
         })
         print(f"[{iteration_label}] Assessment: {status} - {assessment_detail}")
 
         if status == "COMPLETE":
             print(f"Step {step_index+1} completed.")
-            return step_results, step_assessments # ステップ完了
+            return step_results, step_assessments, step_llm_calls, step_brave_calls # 完了時は現在のカウントで終了
         elif status == "ERROR":
              print(f"Error during assessment in Step {step_index+1}. Stopping step.")
-             return step_results, step_assessments # ステップ失敗
+             return step_results, step_assessments, step_llm_calls, step_brave_calls # エラー時は現在のカウントで終了
         elif status == "INCOMPLETE":
              missing_info = assessment_detail # 次のイテレーションのために不足情報を更新
              if iteration == config.DSRC_MAX_ITERATIONS_PER_STEP - 1:
                   print(f"Max iterations reached ({config.DSRC_MAX_ITERATIONS_PER_STEP}) for Step {step_index+1}. Proceeding with incomplete results.")
-                  return step_results, step_assessments # 最大回数試行しても完了せず終了
+                  return step_results, step_assessments, step_llm_calls, step_brave_calls # 最大回数試行しても完了せず終了
              # else: ループ続行
 
     # ここに到達するのは通常、最大反復回数を超えた場合
     print(f"Step {step_index+1} finished after max iterations.")
-    return step_results, step_assessments
+    return step_results, step_assessments, step_llm_calls, step_brave_calls # ループ終了時のカウントで終了
 
 
-async def generate_dsrc_report(question: str, plan: List[str], all_step_results: Dict[str, str], all_assessments: List[Dict[str, Any]]) -> Optional[str]:
+# 戻り値にLLMコール数を追加 -> Optional[Tuple[str, int]]
+async def generate_dsrc_report(question: str, plan: List[str], all_step_results: Dict[str, str], all_assessments: List[Dict[str, Any]]) -> Optional[Tuple[str, int]]:
     """!dsrc の最終レポートを生成する"""
+    llm_calls = 0
     llm_handler = llm_manager.get_current_provider()
     primary_model_name = llm_manager.get_active_model_name('primary')
     lowload_model_name = llm_manager.get_active_model_name('lowload') # Lowloadモデル名も取得
 
     if not llm_handler or not primary_model_name:
         print("Error: Primary model unavailable for DSRC report generation.")
-        return None
+        return None # エラー時はNoneだけ返す
 
-    # レポート生成用の情報を整形
     plan_text = "\n".join(f"{i+1}. {step}" for i, step in enumerate(plan))
 
     # 全検索結果テキスト (URL + content) を結合
@@ -482,6 +508,7 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
             try:
                 # Lowload モデルで要約を試みる
                 summarized_results_raw = await llm_manager.generate_lowload_response(summarize_prompt)
+                llm_calls += 1 # 低負荷LLMコールをカウント
                 summarized_results_text = str(summarized_results_raw).strip() if summarized_results_raw else ""
 
                 # 要約が成功し、エラーメッセージでないか、および「要約できませんでした」でないかチェック
@@ -511,7 +538,8 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
     # --- 全評価結果テキスト ---
     assessments_summary_lines = []
     for assessment in all_assessments:
-         line = f"- Step {assessment['step']} (Iter {assessment['iteration']}): Status={assessment['status']}"
+         # Step実行部分でbrave_callsをassessmentに追加したので、ここでも参照
+         line = f"- Step {assessment['step']} (Iter {assessment['iteration']} / Brave Calls: {assessment.get('brave_calls', 0)}): Status={assessment['status']}"
          # reason が None でないことを確認
          if assessment.get('reason') is not None:
               line += f", Reason={str(assessment['reason'])[:100]}..." # 長すぎる理由を省略
@@ -538,12 +566,13 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
         _used_model, report_response_raw = await llm_manager.generate_response(
             content_parts=[{'text': report_prompt}], chat_history=None, deep_cache_summary=None
         )
+        llm_calls += 1 # Primary LLMコールをカウント
         report_response = str(report_response_raw).strip() if report_response_raw else ""
 
         if not report_response or llm_manager.is_error_message(report_response):
             print(f"DSRC Report generation failed. Response: {report_response}")
             # レポート生成失敗時は、エラーメッセージを返す
-            return f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成失敗)\nReason: {report_response}"
+            return f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成失敗)\nReason: {report_response}", llm_calls
 
         print("DeepResearch Final Report generated successfully.")
 
@@ -559,13 +588,13 @@ async def generate_dsrc_report(question: str, plan: List[str], all_step_results:
              else:
                   report_response += f"\n\n{source_header}\n(ソースなし)" # ソースがない場合
 
-        return report_response
+        return report_response, llm_calls # 成功時はレポートとコール数を返す
 
     except Exception as e:
         print(f"Error during DSRC report generation: {e}")
         import traceback
         traceback.print_exc() # 詳細なエラーログ
-        return f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成中に例外発生: {e})"
+        return f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成中に例外発生: {e})", llm_calls
 
 
 # --- Search Command Handler ---
@@ -577,7 +606,10 @@ async def handle_search_command(
     ):
     """!src および !dsrc コマンド、または自動検索の処理ハンドラ"""
 
-    # APIキーチェックなど
+    # --- APIコールカウンター初期化 ---
+    total_llm_calls = 0
+    total_brave_calls = 0
+
     if not config.BRAVE_SEARCH_API_KEY:
         await message.reply("検索機能は設定されていません (APIキー不足)。", mention_author=False)
         # Thinking Message が残っているかもしれないので削除
@@ -599,7 +631,7 @@ async def handle_search_command(
         return
 
     provider_name = llm_manager.get_current_provider_name()
-    search_source = "Assessment" if triggered_by_assessment else f"!{command_type.upper()}"
+    search_source = "検索が必要と判断されました" if triggered_by_assessment else f"!{command_type.upper()}"
     print(f"[{search_source}] Search process started for: '{original_question}' by {message.author.display_name} (Provider: {provider_name})")
 
     # 思考中メッセージ開始 (assess_and_respond_to_mention から呼ばれた場合は既に表示済み)
@@ -619,7 +651,7 @@ async def handle_search_command(
             answer_model_name = query_model_name
             if not query_model_name:
                  await discord_ui.delete_thinking_message()
-                 await message.reply(bot_constants.ERROR_MSG_LOWLOAD_UNAVAILABLE + f" ({provider_name} に低負荷モデルが設定されていません)", mention_author=False); return
+                 await message.reply(bot_constants.ERROR_MSG_LOWLOAD_UNAVAILABLE + f" ({provider_name})", mention_author=False); return
 
             thinking_msg_prefix = f"…考え中... ({search_source})" # 再設定 (assessmentからの引継ぎも考慮)
             await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} クエリ生成中 ({query_model_name})")
@@ -628,6 +660,7 @@ async def handle_search_command(
             query_gen_prompt = config.SEARCH_QUERY_GENERATION_PROMPT.format(question=original_question)
             # generate_lowload_response を使用
             query_response_raw = await llm_manager.generate_lowload_response(query_gen_prompt)
+            total_llm_calls += 1 # カウント
             query_response_text = str(query_response_raw).strip() if query_response_raw else ""
             if not query_response_text or llm_manager.is_error_message(query_response_text):
                  await discord_ui.delete_thinking_message(); await message.reply("検索クエリ生成失敗。", mention_author=False); return
@@ -641,6 +674,7 @@ async def handle_search_command(
             search_results_api: List[Dict[str, Any]] = []
             for query in search_queries:
                  await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} 検索中: `{query[:30]}...`")
+                 total_brave_calls += 1 # カウント (キャッシュヒット含む)
                  results = await call_brave_search_api(query)
                  if results: search_results_api.extend(results)
                  # call_brave_search_api 内で遅延
@@ -658,7 +692,6 @@ async def handle_search_command(
 
             # 3. 最終応答生成 (Lowloadモデルを使用)
             await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} 応答生成中 ({answer_model_name})")
-            # LLMに渡す結合結果テキスト (srcでは要約しないが、最大長で切り詰める)
             combined_results_text_for_llm = "\n\n".join(f"--- {url} ---\n{text}\n--- End ---" for url, text in all_extracted_content.items())
             if len(combined_results_text_for_llm) > config.MAX_TOTAL_SEARCH_CONTENT_LENGTH: # configの値を再利用
                  combined_results_text_for_llm = combined_results_text_for_llm[:config.MAX_TOTAL_SEARCH_CONTENT_LENGTH] + "...(truncated)"
@@ -666,41 +699,44 @@ async def handle_search_command(
             answer_prompt = config.SIMPLE_SEARCH_ANSWER_PROMPT.format(question=original_question, search_results_text=combined_results_text_for_llm)
             # generate_lowload_response を使用
             final_response_raw = await llm_manager.generate_lowload_response(answer_prompt) # Lowloadモデル
+            total_llm_calls += 1 # カウント
             final_response_text = str(final_response_raw).strip() if final_response_raw else ""
 
             if not final_response_text or llm_manager.is_error_message(final_response_text):
                  await discord_ui.delete_thinking_message(); await message.reply(f"応答生成失敗: {final_response_text}", mention_author=False); return
 
-            response_header = f"(🔍 **Search Result** using {answer_model_name} 🔍)\n\n"
+            # response_header は後で設定
 
         # --- !dsrc の場合 ---
         elif command_type == 'dsrc':
             primary_model_name = llm_manager.get_active_model_name('primary')
             if not primary_model_name:
-                 await discord_ui.delete_thinking_message(); await message.reply(f"{bot_constants.ERROR_MSG_API_ERROR} ({provider_name} にPrimaryモデルが設定されていません)", mention_author=False); return
+                 await discord_ui.delete_thinking_message(); await message.reply(f"{bot_constants.ERROR_MSG_API_ERROR} ({provider_name})", mention_author=False); return
 
-            # all_extracted_content はループ外で初期化済み
-            all_assessments: List[Dict[str, Any]] = [] # 全ステップの評価結果
-
-            thinking_msg_prefix = f"…考え中... ({search_source})" # 再設定
+            all_assessments: List[Dict[str, Any]] = []
+            thinking_msg_prefix = f"…考え中... ({search_source})"
 
             # 1. 計画生成
             await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} 調査計画生成中 ({primary_model_name})")
-            plan = await generate_dsrc_plan(original_question)
-            if not plan: await discord_ui.delete_thinking_message(); await message.reply("調査計画の生成に失敗しました。", mention_author=False); return
-            print(f"[{search_source}] Generated Plan: {plan}") # ログに出力
+            plan_result = await generate_dsrc_plan(original_question)
+            if not plan_result: await discord_ui.delete_thinking_message(); await message.reply("調査計画の生成に失敗しました。", mention_author=False); return
+            plan, plan_llm_calls = plan_result
+            total_llm_calls += plan_llm_calls # カウント加算
+            print(f"[{search_source}] Generated Plan: {plan}")
 
             # 2. 各ステップ実行
             for i, step_description in enumerate(plan):
                 print(f"--- Executing DSRC Step {i+1}: {step_description} ---")
-                # 実行前にthinking message更新 (channelを渡す)
                 await discord_ui.update_thinking_message(message.channel, f"{thinking_msg_prefix} ステップ {i+1}/{len(plan)} 実行中: {step_description[:30]}...")
 
-                step_results, step_assessments = await execute_dsrc_step(
-                    original_question, step_description, i, all_extracted_content # これまでの全結果を渡す
+                # execute_dsrc_step を呼び出し、返り値からカウントを取得
+                step_results, step_assessments, step_llm, step_brave = await execute_dsrc_step(
+                    original_question, step_description, i, all_extracted_content
                 )
-                all_extracted_content.update(step_results) # 新しい結果を全体の結果に追加
-                all_assessments.extend(step_assessments) # 新しい評価を全体評価に追加
+                total_llm_calls += step_llm # カウント加算
+                total_brave_calls += step_brave # カウント加算
+                all_extracted_content.update(step_results)
+                all_assessments.extend(step_assessments)
 
                 # ステップ実行中にエラーが発生した場合 (assessment の status が ERROR)
                 if any(a['status'] == 'ERROR' for a in step_assessments if a.get('step') == i+1): # このステップのエラーのみチェック
@@ -720,16 +756,34 @@ async def handle_search_command(
             if not all_extracted_content:
                  await discord_ui.delete_thinking_message(); await message.reply("詳細検索の結果、有効な情報が見つかりませんでした。", mention_author=False); return
 
-            # generate_dsrc_report 関数内で要約処理が実行される
-            final_response_text = await generate_dsrc_report(original_question, plan, all_extracted_content, all_assessments)
+            report_result = await generate_dsrc_report(original_question, plan, all_extracted_content, all_assessments)
+            if not report_result: # レポート生成自体がNoneを返した場合 (非常に稀な内部エラー)
+                await discord_ui.delete_thinking_message(); await message.reply(f"{bot_constants.ERROR_MSG_INTERNAL} (最終レポート生成プロセスで予期せぬエラー)", mention_author=False); return
 
-            if not final_response_text or llm_manager.is_error_message(final_response_text):
+            report_text, report_llm_calls = report_result
+            total_llm_calls += report_llm_calls # カウント加算
+            final_response_text = report_text # レポートテキスト (エラーメッセージ含む可能性あり)
+
+            if llm_manager.is_error_message(final_response_text): # generate_dsrc_reportがエラーメッセージを返した場合
                  await discord_ui.delete_thinking_message(); await message.reply(f"最終レポート生成失敗: {final_response_text}", mention_author=False); return
 
-            response_header = f"(🔬 **DeepResearch Report** using {primary_model_name} 🔬)\n\n"
+            # response_header は後で設定
 
         # --- 共通: 最終応答送信 ---
         await discord_ui.delete_thinking_message()
+
+        # --- response_header に API コール数を追加 ---
+        # brave calls はキャッシュヒット含むため注意書きを追加
+        api_usage_info = f"(LLM Calls: {total_llm_calls}, Brave Calls: {total_brave_calls} [incl. cache hits])"
+        if command_type == 'src':
+            answer_model_name = llm_manager.get_active_model_name('lowload') or "Lowload"
+            response_header = f"{api_usage_info}\n(🔍 **Search Result** using {answer_model_name} 🔍)\n\n"
+        elif command_type == 'dsrc':
+            primary_model_name = llm_manager.get_active_model_name('primary') or "Primary"
+            response_header = f"{api_usage_info}\n(🔬 **DeepResearch Report** using {primary_model_name} 🔬)\n\n"
+        else: # 万が一のため
+            response_header = f"{api_usage_info}\n\n"
+
         full_response = response_header + final_response_text
 
         # ソースリストのフォールバック (generate_dsrc_report内で処理済み)
@@ -772,7 +826,6 @@ async def handle_search_command(
         # --- キャッシュ更新と追跡質問ボタン (応答成功後) ---
         # エラーメッセージでない、かつメッセージ送信に成功した場合のみ実行
         if final_sent_message and final_response_text and not llm_manager.is_error_message(final_response_text):
-            # 1. キャッシュ更新
             try:
                 print(f"[{search_source}] Updating cache for channel {message.channel.id}...")
                 # mentionを除去した完全なユーザー入力テキスト (コマンド/質問含む)
@@ -814,9 +867,7 @@ async def handle_search_command(
                 import traceback
                 traceback.print_exc()
 
-            # 2. 追跡質問ボタン生成
             try:
-                 # 非同期でボタン生成・追加を実行
                  print(f"[{search_source}] Generating follow-up buttons...")
                  # message.channel.id を渡す
                  asyncio.create_task(discord_ui.generate_and_add_followup_buttons(final_sent_message, message.channel.id))
