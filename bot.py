@@ -4,7 +4,7 @@
 import discord
 import os
 import asyncio
-from typing import Optional, Literal
+from typing import Optional, Literal, cast
 import re
 
 # --- モジュールインポート ---
@@ -184,7 +184,8 @@ async def on_message(message: discord.Message):
         #    注意: コマンドと -nosrc が同時に指定された場合の挙動は未定義だが、コマンドを優先する
         search_command_match = re.match(r'!(src|dsrc)\s+(.*)', content_without_mention, re.IGNORECASE | re.DOTALL)
         if search_command_match:
-            search_command_type = search_command_match.group(1).lower()
+            # Pylanceエラーを解決するため、typing.cast を使用して型を明示的に指定
+            search_command_type = cast(Literal['src', 'dsrc'], search_command_match.group(1).lower())
             query_text_for_command = search_command_match.group(2).strip()
             if query_text_for_command:
                 # search_handler に処理を移譲
