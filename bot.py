@@ -8,7 +8,12 @@ from langchain.memory import ConversationBufferMemory
 from datetime import datetime, timedelta, timezone
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 from tools.brave_search import brave_search # 作成した検索ツールをインポート
+from tools.memory_tools import remember_information_func, recall_information_func, RememberInput, RecallInput # 記憶・想起ツール関数とInputスキーマをインポート
+from tools.general_chat import general_chat_func, GeneralChatInput, general_chat_tool # 雑談ツール関数とInputスキーマ、ツールオブジェクトをインポート
 from pathlib import Path # ファイルパス操作のため
+from tools.db_utils import initialize_db # データベース初期化関数をインポート
+from functools import partial # LLMをツールにバインドするために使用
+from langchain_core.tools import Tool, StructuredTool # ToolクラスとStructuredToolをインポート
 
 # 0. 環境変数の読み込み
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -89,6 +94,7 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f'Logged in as {client.user}')
+    initialize_db() # データベースを初期化
     await load_system_instructions_template() # Bot起動時に指示テンプレートを読み込む
     if await initialize_llm():
         print("Bot is ready and LLM is initialized.")
@@ -121,7 +127,7 @@ async def on_message(message):
             await message.channel.send(f"こんにちは、{message.author.name}さん！何かお手伝いできることはありますか？")
             return
 
-        print(f"User message: {content}")
+        print(f"User message (after mention removal): '{content}'") # 追加
 
         try:
             # チャンネルのメモリを取得または初期化
@@ -150,7 +156,40 @@ async def on_message(message):
                 memory = channel_memories[message.channel.id]
 
             # ツールを定義
-            tools = [brave_search]
+            # LLMインスタンスをツール関数にバインドし、Toolオブジェクトとしてラップ
+            # ツールを定義
+            # LLMインスタンスとDiscordコンテキスト情報をツール関数にバインドし、Toolオブジェクトとしてラップ
+            current_server_id = str(message.guild.id) if message.guild else "DM_Channel"
+            current_channel_id = str(message.channel.id)
+            current_user_id = str(message.author.id)
+
+            remember_tool = StructuredTool.from_function(
+                func=partial(remember_information_func, llm=llm, server_id=current_server_id, channel_id=current_channel_id, user_id=current_user_id),
+                name="remember_information",
+                description=(
+                    "ユーザーから提供された情報を記憶します。このツールは、メッセージが送信されたサーバーID、チャンネルID、ユーザーIDを自動的に取得します。日付、時間、場所、イベント名、参加者、詳細などの情報を記憶できます。例えば、「6/16に予算採択の打ち上げがあるから覚えといて。場所は3階ラウンジね」という指示の場合、記憶する内容の要約を`memory_key`に（例: '6/16 予算採択打ち上げ'）、具体的な詳細を`content_to_remember`に（例: '6月16日、予算採択の打ち上げ、場所は3階ラウンジ'）渡してください。授業日程表、連絡先リスト、重要なメモなどを構造化して保存するのに適しています。"
+                ),
+                args_schema=RememberInput
+            )
+            recall_tool = StructuredTool.from_function(
+                func=partial(recall_information_func, llm=llm, server_id=current_server_id),
+                name="recall_information",
+                description=(
+                    "以前に記憶した情報について質問に答えます。例えば、『月曜日の1限は何？』や『山田太郎さんの電話番号を教えて』のように使います。"
+                    "何について知りたいかを具体的に質問してください。"
+                ),
+                args_schema=RecallInput
+            )
+
+            # general_chat_toolをLLMにバインドしてツールリストに追加
+            general_chat_tool_bound = Tool(
+                name=general_chat_tool.name,
+                description=general_chat_tool.description,
+                func=partial(general_chat_func, llm=llm),
+                args_schema=general_chat_tool.args_schema
+            )
+
+            tools = [brave_search, remember_tool, recall_tool, general_chat_tool_bound]
 
             # Client IDをシステム指示テンプレートに埋め込む
             current_system_instructions = SYSTEM_INSTRUCTIONS_TEMPLATE.replace("{client_id}", str(client.user.id))
@@ -159,7 +198,7 @@ async def on_message(message):
             prompt_template = ChatPromptTemplate.from_messages([
                 ("system", current_system_instructions), # フォーマット済みの指示を使用
                 MessagesPlaceholder(variable_name="chat_history"), # 会話履歴のプレースホルダー
-                HumanMessage(content=content),
+                HumanMessage(content="{input}"),
                 MessagesPlaceholder(variable_name="agent_scratchpad") # Agentの思考過程
             ])
 
@@ -168,8 +207,14 @@ async def on_message(message):
             # AgentExecutorにmemoryを渡すことで、自動的に履歴が管理される
             agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, memory=memory, handle_parsing_errors=True) # handle_parsing_errorsを追加
 
+            # AgentExecutorに渡す情報を準備
+            agent_input = {
+                "input": content, # ユーザーのメッセージ
+            }
+            print(f"Agent input prepared: {agent_input}") # 追加
+
             # AgentExecutorを実行 (chat_historyはmemoryから自動的に供給されるため、ここでは渡さない)
-            response = await agent_executor.ainvoke({"input": content})
+            response = await agent_executor.ainvoke(agent_input)
 
             if response and "output" in response: # AgentExecutorの応答は辞書形式で'output'キーを持つ
                 await message.channel.send(str(response["output"])) # 明示的に文字列に変換
