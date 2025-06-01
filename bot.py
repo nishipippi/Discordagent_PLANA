@@ -1,247 +1,202 @@
-# bot.py
-# (メインのボットファイル - Discordクライアント、イベントハンドラ)
-
 import discord
 import os
-import asyncio
-from typing import Optional, Literal, cast
-import re
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain.memory import ConversationBufferMemory
+from datetime import datetime, timedelta, timezone
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from tools.brave_search import brave_search # 作成した検索ツールをインポート
+from pathlib import Path # ファイルパス操作のため
 
-# --- モジュールインポート ---
-import config
-import bot_constants
-import llm_manager
-import cache_manager
-import search_handler
-import command_handler
-import discord_ui
-from llm_provider import LLMProvider # 型ヒント用
+# 0. 環境変数の読み込み
+dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
+print(f"Looking for .env file at: {dotenv_path}")
+load_dotenv(dotenv_path=dotenv_path, override=True)
 
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_PRIMARY_MODEL") # または GEMINI_LOWLOAD_MODEL
 
-# --- Discordクライアント設定 ---
+# --- ファイルパス設定 ---
+BASE_DIR = Path(__file__).parent
+PROMPTS_DIR = BASE_DIR / "prompts"
+SYSTEM_INSTRUCTION_PATH = PROMPTS_DIR / "system_instruction.txt"
+
+# --- グローバル変数 ---
+llm = None # グローバルでLLMオブジェクトを保持
+channel_memories = {} # チャンネルごとの会話履歴を保持
+SYSTEM_INSTRUCTIONS_TEMPLATE = "" # システム指示のテンプレートを保持する変数
+
+# --- プロンプト読み込みユーティリティ ---
+def load_prompt_file(file_path: Path) -> str:
+    """指定されたパスのプロンプトファイルを読み込む"""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print(f"Error: Prompt file not found at {file_path}")
+        return "" # ファイルが見つからない場合は空文字列を返す
+    except Exception as e:
+        print(f"Error loading prompt from {file_path}: {e}")
+        return "" # エラー発生時も空文字列を返す
+
+async def load_system_instructions_template():
+    global SYSTEM_INSTRUCTIONS_TEMPLATE
+    SYSTEM_INSTRUCTIONS_TEMPLATE = load_prompt_file(SYSTEM_INSTRUCTION_PATH)
+    if not SYSTEM_INSTRUCTIONS_TEMPLATE:
+        print(f"Warning: System instructions template not loaded from {SYSTEM_INSTRUCTION_PATH}. Using default.")
+        SYSTEM_INSTRUCTIONS_TEMPLATE = "あなたは親切で少しユーモラスなDiscord AIアシスタントです。ユーザーの質問に丁寧に答えます。必要に応じてツールを使用してください。"
+    else:
+        print(f"Successfully loaded system instructions template from {SYSTEM_INSTRUCTION_PATH}")
+
+# --- LangChain & Gemini 設定 ---
+async def initialize_llm():
+    global llm
+    if not GEMINI_API_KEY:
+        print("Error: GEMINI_API_KEY is not set.")
+        return False
+    if not GEMINI_MODEL:
+        print("Error: GEMINI_PRIMARY_MODEL (or LOWLOAD_MODEL) is not set.")
+        return False
+
+    try:
+        print(f"Initializing Gemini Model: {GEMINI_MODEL}")
+        llm = ChatGoogleGenerativeAI(
+            model=GEMINI_MODEL,
+            google_api_key=GEMINI_API_KEY,
+            temperature=0.7
+        )
+        # 疎通確認
+        response = await llm.ainvoke("こんにちは！")
+        if response and hasattr(response, 'content'):
+            print(f"Gemini LLM initialized successfully. Test response: {response.content[:50]}...")
+            return True
+        else:
+            print("Gemini LLM initialization failed: No content in test response.")
+            return False
+    except Exception as e:
+        print(f"Error initializing LangChain/Gemini LLM: {e}")
+        return False
+
+# --- Discord Bot 設定 ---
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True # 投票機能やタイマーのメンションで必要になる可能性
-intents.guilds = True
-intents.reactions = True # 投票機能で必要
 
 client = discord.Client(intents=intents)
-discord_client_id: str = "Unknown" # on_readyで設定
 
-# --- ステータスメッセージ更新関数 ---
-async def update_presence():
-    """DiscordのPresence（ステータス）を更新する"""
-    provider_name = llm_manager.get_current_provider_name()
-    provider_display_name = provider_name.capitalize() if provider_name else "N/A"
-
-    # コマンドリスト (configから取る方が良いかも？)
-    commands = "!gemini, !mistral, !timer, !poll, !csum, !cclear, !his | @メンション+!src/!dsrc <検索語>" # 検索コマンドを修正
-    activity_text = f"命令待機中 ({provider_display_name}) | {commands}"
-
-    # 機能制限のチェック
-    lowload_available = bool(llm_manager.get_active_model_name('lowload'))
-    primary_available = bool(llm_manager.get_active_model_name('primary'))
-    search_available = bool(config.BRAVE_SEARCH_API_KEY)
-
-    limited_features = []
-    # llm_handler が None の場合はモデル利用不可
-    if not llm_manager.get_current_provider():
-        limited_features.extend(["Primaryモデル", "低負荷モデル"])
-    else:
-        if not primary_available: limited_features.append("Primaryモデル")
-        if not lowload_available: limited_features.append("低負荷モデル")
-
-    if not search_available: limited_features.append("検索")
-
-    if limited_features:
-         activity_text += f" (機能制限: {', '.join(limited_features)})"
-
-    try:
-        await client.change_presence(activity=discord.Game(name=activity_text))
-        print(f"Presence updated: {activity_text}")
-    except Exception as e:
-        print(f"Error updating presence: {e}")
-
-
-# --- イベントハンドラ ---
 @client.event
 async def on_ready():
-    """ボット起動時の処理"""
-    global discord_client_id
-
-    if client.user:
-        discord_client_id = str(client.user.id)
-        print(f"Client ID 設定: {discord_client_id}")
-        # ペルソナ指示にClient IDを反映
-        llm_manager.set_persona_instruction(
-            bot_constants.PERSONA_TEMPLATE.format(client_id=discord_client_id)
-        )
+    print(f'Logged in as {client.user}')
+    await load_system_instructions_template() # Bot起動時に指示テンプレートを読み込む
+    if await initialize_llm():
+        print("Bot is ready and LLM is initialized.")
     else:
-        print("CRITICAL: Botユーザー情報の取得に失敗しました。")
-        await client.close(); return
-
-    if not config.DISCORD_TOKEN:
-        print("CRITICAL: DISCORD_TOKEN が .env に未設定。")
-        await client.close(); return
-
-    if not config.BRAVE_SEARCH_API_KEY:
-        print("WARNING: BRAVE_SEARCH_API_KEY が .env に未設定です。検索機能(!src, !dsrc)は利用できません。")
-
-    # --- 初期LLMプロバイダーの初期化 ---
-    print(f"Attempting to initialize initial provider: {config.INITIAL_LLM_PROVIDER_NAME}")
-    initial_handler = await llm_manager.initialize_provider(config.INITIAL_LLM_PROVIDER_NAME)
-
-    if not initial_handler:
-        print(f"CRITICAL: Failed to initialize initial provider {config.INITIAL_LLM_PROVIDER_NAME}.")
-        # フォールバック試行
-        fallback_provider_name = 'MISTRAL' if config.INITIAL_LLM_PROVIDER_NAME == 'GEMINI' else 'GEMINI'
-        print(f"Attempting to initialize fallback provider: {fallback_provider_name}")
-        fallback_handler = await llm_manager.initialize_provider(fallback_provider_name)
-        if not fallback_handler:
-            print("CRITICAL: Failed to initialize any LLM provider. Bot cannot function properly.")
-            # llm_manager内部の _llm_handler は None のまま
-
-    # --- キャッシュディレクトリ作成 ---
-    cache_manager.ensure_cache_directories()
-
-    # --- 起動情報表示 ---
-    print('--------------------------------------------------')
-    print("Discord接続完了")
-    if client.user: print(f'アカウント {client.user} ({discord_client_id}) としてログイン。')
-    current_provider = llm_manager.get_current_provider()
-    provider_name = llm_manager.get_current_provider_name()
-    print(f'現在のプロバイダー: {provider_name}')
-
-    if current_provider:
-        primary_name = current_provider.get_model_name('primary') or "N/A"
-        secondary_name = current_provider.get_model_name('secondary') or "N/A"
-        lowload_name = current_provider.get_model_name('lowload') or "N/A"
-        print(f'モデル設定: Primary={primary_name}, Secondary={secondary_name}, Lowload={lowload_name}')
-        # OpenAI互換プロバイダーの場合、Base URLも表示
-        if hasattr(current_provider, 'base_url') and getattr(current_provider, 'base_url'):
-             print(f'API Base URL: {getattr(current_provider, "base_url")}')
-    else:
-        print("警告: LLMハンドラーが初期化されていません！ 機能しません。")
-
-    if config.BRAVE_SEARCH_API_KEY:
-        print("Brave Search API Key is set. Search features enabled.")
-    else:
-        print("Brave Search API Key is NOT set. Search features disabled.")
-    print('--------------------------------------------------')
-
-    # --- ステータスメッセージ設定 ---
-    await update_presence()
-
-    print("Bot is ready!")
-
+        print("Bot is ready, but LLM initialization failed. Check API keys and model name.")
 
 @client.event
-async def on_message(message: discord.Message):
-    """メッセージ受信時の処理"""
-    # --- 基本チェック ---
-    if message.author == client.user: return
-    if not message.guild: return
-    if not client.user: return
-
-    llm_handler = llm_manager.get_current_provider()
-    # LLMが利用不可でも検索要否判断はさせたいが、検索自体はLLMが必要
-    # メンション応答もLLMが必要なので、ここで弾くのは維持する
-    if not llm_handler:
-        if client.user.mentioned_in(message):
-            await message.reply(bot_constants.ERROR_MSG_INTERNAL + " (LLM Provider not available)", mention_author=False)
+async def on_message(message):
+    if message.author == client.user:
         return
 
-    content_lower = message.content.lower().strip() if message.content else ""
-    is_mention = client.user.mentioned_in(message)
+    # Botがメンションされているか、またはDMでメッセージが送られてきた場合
+    # client.user が None でないことを確認
+    if client.user and (client.user in message.mentions or isinstance(message.channel, discord.DMChannel)):
+        channel_info = "DM"
+        if isinstance(message.channel, discord.TextChannel) or isinstance(message.channel, discord.GroupChannel) or isinstance(message.channel, discord.VoiceChannel):
+            channel_info = message.channel.name
+        print(f"Mentioned by: {message.author} in {channel_info}")
 
-    # 1. 通常コマンド (!gemini, !mistral, etc.)
-    #    検索コマンド(!src, !dsrc)はメンション必須のためここでは処理しない
-    if not is_mention:
-        command_processed = await command_handler.handle_command(message)
-        if command_processed:
-            if content_lower in ['!gemini', '!mistral']:
-                 await update_presence()
-            return # コマンド処理完了なら終了
+        if llm is None:
+            await message.channel.send("AIモデルがまだ準備できていません。しばらくお待ちください。")
+            return
 
-    # 2. メンション付きメッセージの処理
-    if is_mention:
-        # メンション文字列を除去
-        mention_strings = [f'<@!{client.user.id}>', f'<@{client.user.id}>']
-        content_without_mention = message.content
-        for mention in mention_strings:
-            content_without_mention = content_without_mention.replace(mention, '').strip()
+        # メンション部分を削除してユーザーのメッセージを取得 (DMの場合はメンションがないのでそのまま)
+        content = message.content
+        if client.user in message.mentions:
+            content = content.replace(f'<@{client.user.id}>', '').strip()
 
-        # 2a. -nosrc フラグチェック
-        no_search_flag_match = re.search(r'\s-nosrc\b', content_without_mention, re.IGNORECASE)
-        question_text = content_without_mention # デフォルト
-        perform_search_assessment = True # 検索要否判断を行うか
-        if no_search_flag_match:
-            question_text = content_without_mention.replace(no_search_flag_match.group(0), '').strip()
-            perform_search_assessment = False
-            print("'-nosrc' flag detected. Skipping search assessment.")
+        if not content:
+            await message.channel.send(f"こんにちは、{message.author.name}さん！何かお手伝いできることはありますか？")
+            return
 
-        # 2b. 検索コマンド (!src, !dsrc) チェック
-        #    注意: コマンドと -nosrc が同時に指定された場合の挙動は未定義だが、コマンドを優先する
-        search_command_match = re.match(r'!(src|dsrc)\s+(.*)', content_without_mention, re.IGNORECASE | re.DOTALL)
-        if search_command_match:
-            # Pylanceエラーを解決するため、typing.cast を使用して型を明示的に指定
-            search_command_type = cast(Literal['src', 'dsrc'], search_command_match.group(1).lower())
-            query_text_for_command = search_command_match.group(2).strip()
-            if query_text_for_command:
-                # search_handler に処理を移譲
-                asyncio.create_task(search_handler.handle_search_command(message, search_command_type, query_text_for_command))
+        print(f"User message: {content}")
+
+        try:
+            # チャンネルのメモリを取得または初期化
+            if message.channel.id not in channel_memories:
+                memory = ConversationBufferMemory(
+                    memory_key="chat_history", # MessagesPlaceholderのvariable_nameと合わせる
+                    return_messages=True # メッセージオブジェクトのリストとして履歴を返す
+                )
+                channel_memories[message.channel.id] = memory
+
+                # 初回のみ、Discordの過去10分間の会話履歴をロード
+                # Bot自身のメッセージは除外
+                # ユーザーのメッセージはHumanMessage、BotのメッセージはAIMessageとして追加
+                time_threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
+                # limitを増やすことで、より多くの履歴を取得できるが、トークン制限に注意
+                async for msg_from_history in message.channel.history(limit=50, after=time_threshold, oldest_first=True):
+                    if msg_from_history.id == message.id: # 現在のメッセージは含めない
+                        continue
+                    if msg_from_history.author == client.user:
+                        # BotのメッセージはAIMessageとして追加
+                        memory.chat_memory.add_ai_message(msg_from_history.content)
+                    elif not msg_from_history.author.bot: # Bot以外のユーザーメッセージ
+                        # ユーザーのメッセージはHumanMessageとして追加
+                        memory.chat_memory.add_user_message(msg_from_history.content)
             else:
-                await message.reply(f"!{search_command_type} の後に検索内容を指定してください。", mention_author=False)
-            return # 検索コマンド処理後は終了
+                memory = channel_memories[message.channel.id]
 
-        # 2c. 検索コマンド以外、またはメンションのみの場合
-        if not question_text.strip(): # メンションのみ（フラグやコマンド除去後に空になった場合も含む）
-             # -nosrcがあってもメンションのみなら応答
-             await message.reply("…呼びましたか？", mention_author=False)
-             return
+            # ツールを定義
+            tools = [brave_search]
 
-        # 2d. 検索要否判断と応答 (-nosrcフラグがない場合)
-        if perform_search_assessment:
-            print(f"Assessing search necessity for mention: '{question_text[:50]}...'")
-            # search_handler に検索判断と、必要に応じた検索実行、または通常応答の呼び出しを依頼
-            await search_handler.assess_and_respond_to_mention(message, question_text)
-        else:
-            # -nosrc フラグがあったので、検索せずに通常のメンション応答
-            print("Calling handle_mention directly due to -nosrc flag.")
-            await command_handler.handle_mention(message, client.user, question_text=question_text, perform_search=False)
-        return
+            # Client IDをシステム指示テンプレートに埋め込む
+            current_system_instructions = SYSTEM_INSTRUCTIONS_TEMPLATE.replace("{client_id}", str(client.user.id))
+
+            # ペルソナ、会話履歴、ユーザーのメッセージ、Agentの思考過程を含むプロンプトを作成
+            prompt_template = ChatPromptTemplate.from_messages([
+                ("system", current_system_instructions), # フォーマット済みの指示を使用
+                MessagesPlaceholder(variable_name="chat_history"), # 会話履歴のプレースホルダー
+                HumanMessage(content=content),
+                MessagesPlaceholder(variable_name="agent_scratchpad") # Agentの思考過程
+            ])
+
+            # Agentの作成
+            agent = create_tool_calling_agent(llm, tools, prompt_template)
+            # AgentExecutorにmemoryを渡すことで、自動的に履歴が管理される
+            agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, memory=memory, handle_parsing_errors=True) # handle_parsing_errorsを追加
+
+            # AgentExecutorを実行 (chat_historyはmemoryから自動的に供給されるため、ここでは渡さない)
+            response = await agent_executor.ainvoke({"input": content})
+
+            if response and "output" in response: # AgentExecutorの応答は辞書形式で'output'キーを持つ
+                await message.channel.send(str(response["output"])) # 明示的に文字列に変換
+                print(f"Sent Agent's reply: {str(response['output'])[:100]}...")
+            else:
+                await message.channel.send("AIからの応答がありませんでした。")
+                print(f"AIからの応答が予期した形式ではありません。Raw response: {response}")
 
 
-# --- BOT起動 ---
+        except discord.errors.Forbidden:
+            channel_name_for_error = "DM"
+            if isinstance(message.channel, discord.TextChannel) or isinstance(message.channel, discord.GroupChannel) or isinstance(message.channel, discord.VoiceChannel):
+                channel_name_for_error = message.channel.name
+            print(f"Error: Missing permissions to send message in {channel_name_for_error}")
+            await message.channel.send("メッセージを送信する権限がありません。")
+        except Exception as e:
+            print(f"Error processing message with Gemini: {e}")
+            await message.channel.send(f"エラーが発生しました: {e}")
+
+# --- Botの実行 ---
 if __name__ == "__main__":
-    # 依存ライブラリチェック (簡易版)
-    try:
-        import dotenv
-        import google.generativeai
-        import openai
-        import httpx
-        import aiofiles
-        print("Required libraries seem to be installed.")
-    except ImportError as e:
-        print(f"CRITICAL: 必要なライブラリが不足しています: {e}")
-        print("実行前に `pip install -r requirements.txt` または必要なライブラリをインストールしてください。")
-        exit(1)
-    except Exception as e:
-         print(f"CRITICAL: 依存ライブラリチェック中に予期せぬエラー: {e}")
-         exit(1)
-
-    # BOT実行
-    try:
-        print("BOT起動処理開始...")
-        if not config.DISCORD_TOKEN:
-            print("CRITICAL: DISCORD_TOKEN が見つかりません。 .env ファイルを確認してください。")
-            exit(1)
-        client.run(config.DISCORD_TOKEN)
-    except discord.LoginFailure:
-        print("CRITICAL: 不正なDiscordトークンです。 .env ファイルを確認してください。")
-    except discord.PrivilegedIntentsRequired:
-        print("CRITICAL: 必要な特権インテント（Message Contentなど）が無効になっています。Discord Developer PortalでBotの設定を確認してください。")
-    except Exception as e:
-        print(f"CRITICAL: BOT実行中に予期せぬエラーが発生しました: {e}")
-        import traceback
-        traceback.print_exc()
+    if not DISCORD_TOKEN:
+        print("Error: DISCORD_TOKEN is not set. Please check your .env file.")
+    else:
+        try:
+            client.run(DISCORD_TOKEN)
+        except discord.errors.LoginFailure:
+            print("Error: Failed to log in. Please check your DISCORD_TOKEN.")
+        except Exception as e:
+            print(f"Error running bot: {e}")

@@ -1,0 +1,11 @@
+以下の元の質問と、現在の調査ステップの説明、そして**これまでのクエリでは目的を達成できなかった**こと、アセスメントを踏まえ、このステップの目的達成に必要な情報を得るための**新しい**検索クエリを生成してください。
+
+Original Question: {question}
+Current Step: {step_description}
+Previous Queries for this Step: {used_queries_for_step}
+Missing Info from Last Assessment: {missing_info}
+
+最も関連性が高いと思われる新しい検索クエリを**これまでのクエリでは目的を達成できなかった**ことを踏まえ、1行に1つ、最大3つまで出力してください。
+**検索クエリのみを出力**し、**それ以外のテキストは含めないで**ください。
+
+New Search Queries:

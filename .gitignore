@@ -1,1 +1,4 @@
 .env
+dev_plan
+# Python virtual environment
+.venv/
