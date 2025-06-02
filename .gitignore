@@ -2,5 +2,3 @@
 dev_plan
 # Python virtual environment
 .venv/
-
-tools/__pycache__
