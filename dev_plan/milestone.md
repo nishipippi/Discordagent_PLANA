@@ -1,37 +1,37 @@
 マイルストーン (LangChain & LangGraph版)Discord AIエージェント開発マイルストーンフェーズ０：準備・基盤構築
-M0.1: 開発環境構築
+M0.1: 開発環境構築 - 完了
 
-Python環境設定 (venv を使用)
-必要なライブラリのインストール (discord.py, langchain, langgraph, langchain-openai (または langchain-google-genai 等のLLM連携ライブラリ), google-genai (Gemini利用時), python-dotenv, requests など。brave-search は numpy のコンパイル問題で代替実装)
-Gitリポジトリ作成とバージョン管理設定 (既存リポジトリ使用、.gitignore 更新)
-
-
-M0.2: APIキーと認証情報の設定
-
-Discord Botトークンの取得と設定 (.env ファイル使用)
-LLM APIキー (OpenAI, Google GenAI等) の設定 (.env ファイル使用)
-Brave Search APIキーの設定 (.env ファイル使用)
+Python環境設定 (venv を使用) - 完了
+必要なライブラリのインストール (discord.py, langchain, langgraph, langchain-openai (または langchain-google-genai 等のLLM連携ライブラリ), google-genai (Gemini利用時), python-dotenv, requests など。brave-search は numpy のコンパイル問題で代替実装) - 完了
+Gitリポジトリ作成とバージョン管理設定 (既存リポジトリ使用、.gitignore 更新) - 完了
 
 
-M0.3: 基本的なDiscord Botの疎通確認
+M0.2: APIキーと認証情報の設定 - 完了
 
-BotがDiscordサーバーに接続し、メンションに簡単な固定メッセージで応答できることを確認 (bot.py 作成)
-LangChainの基本的なセットアップと動作確認（例: ChatOpenAI または ChatGoogleGenerativeAI を使用し、簡単な応答生成を確認）
-LangGraphの基本的なセットアップと簡単なグラフ実行確認 
+Discord Botトークンの取得と設定 (.env ファイル使用) - 完了
+LLM APIキー (OpenAI, Google GenAI等) の設定 (.env ファイル使用) - 完了
+Brave Search APIキーの設定 (.env ファイル使用) - 完了
+
+
+M0.3: 基本的なDiscord Botの疎通確認 - 完了
+
+BotがDiscordサーバーに接続し、メンションに簡単な固定メッセージで応答できることを確認 (bot.py 作成) - 完了
+LangChainの基本的なセットアップと動作確認（例: ChatOpenAI または ChatGoogleGenerativeAI を使用し、簡単な応答生成を確認） - 完了
+LangGraphの基本的なセットアップと簡単なグラフ実行確認 - 完了
 
 
 フェーズ１：中核機能の実装 (MVP - Minimum Viable Product) - LangGraphによるステートフルエージェント化
-M1.1: 自然言語による指示の理解と雑談応答 (LangChain & LangGraph)
+M1.1: 自然言語による指示の理解と雑談応答 (LangChain & LangGraph) - 完了
 
-メンションされた内容をLangChainのChatPromptTemplateとLLM (ChatOpenAI等) を用いて処理し、基本的な雑談応答をLangGraphのノードとして実装。
-AIのペルソナ（プラナ）を設定ファイルから読み込み、LangChainのプロンプトに反映。
-LangGraphで基本的な会話状態 (State) を定義。
+メンションされた内容をLangChainのChatPromptTemplateとLLM (ChatOpenAI等) を用いて処理し、基本的な雑談応答をLangGraphのノードとして実装。 - 完了
+AIのペルソナ（プラナ）を設定ファイルから読み込み、LangChainのプロンプトに反映。 - 完了
+LangGraphで基本的な会話状態 (State) を定義。 - 完了
 
 
-M1.2: 会話履歴の取得とコンテキスト利用 (LangChain Memory & LangGraph State)
+M1.2: 会話履歴の取得とコンテキスト利用 (LangChain Memory & LangGraph State) - 部分的に完了（会話履歴のコンテキスト利用に課題あり）
 
-メンションされたチャンネルの直近の会話履歴をlangchain-discordのDiscordReadMessagesツール等で取得し、LangChainのConversationBufferWindowMemory (または同等のメモリコンポーネント) をLangGraphのステートの一部としてユーザーIDごとに管理・永続化する仕組みを実装。
-履歴と現在の指示の区別を明確化し、LLMへの入力コンテキストに含める。
+メンションされたチャンネルの直近の会話履歴をlangchain-discordのDiscordReadMessagesツール等で取得し、LangChainのConversationBufferWindowMemory (または同等のメモリコンポーネント) をLangGraphのステートの一部としてユーザーIDごとに管理・永続化する仕組みを実装。 - 部分的に完了（直近のメッセージ履歴は取得できるが、LLMがそれを長期記憶として利用できていない）
+履歴と現在の指示の区別を明確化し、LLMへの入力コンテキストに含める。 - 部分的に完了（履歴はLLMに渡されるが、LLMがそれを記憶として活用できていない）
 
 
 M1.3: 自律的な検索機能の実装 (LangChain Custom Tool & LangGraph Agent Logic)
@@ -57,7 +57,7 @@ tools/memory_tools.py にユーザーの入力テキストをLLM (ChatOpenAI等)
 server_id, channel_id, user_id をツールに渡すため、LangGraphのステートまたはエージェント呼び出し時の引数として管理。
 
 
-M1.4.3: 想起ツール (recall_information) の実装 (LangChain Tool & LangGraph) - 進行中
+M1.4.3: 想起ツール (recall_information) の実装 (LangChain Tool & LangGraph)
 
 tools/memory_tools.py に recall_information_func 関数と対応するPydanticモデル (RecallInput) を定義。
 構造化データはSQLiteから、意味的に関連する情報はベクトルストアから検索し、LLMを用いてユーザーの質問に回答を生成するロジックを実装。これをLangChainのToolとしてラップ。
@@ -75,8 +75,7 @@ LangGraphのステートとエッジを調整し、記憶・想起フローを�
 
 LangGraphを用いたより複雑な状態遷移と、ユーザーごとのメモリ永続化の堅牢な実装。
 ベクトルストアを利用した高度な想起機能のチューニング。
-
-
+M1.2: 会話履歴のコンテキスト利用において、LLMが過去の会話内容を長期記憶として活用できていない。これは、プロンプトの指示不足、またはLangGraphのState管理とLLMへのコンテキスト渡し方の改善が必要である可能性を示唆している。
 
 
 フェーズ２：マルチモーダル機能と高度なインタラクションの実装 (LangChain & LangGraph)

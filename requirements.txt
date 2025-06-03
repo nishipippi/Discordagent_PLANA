@@ -1,0 +1,12 @@
+discord.py
+langchain
+langgraph
+langchain-google-genai
+google-genai
+python-dotenv
+requests
+chromadb
+faiss-cpu
+APScheduler
+langchain-discord-shikenso
+Pillow
