@@ -13,10 +13,14 @@ def call_llm(state: AgentState) -> AgentState:
         "chat_history": chat_history
     })
 
-    # 応答をStateに保存
+    # LLMの応答をチャット履歴に追加して返す
+    # bot.pyのon_messageで最終応答を追加するロジックと連携するため、
+    # ここではLLMの応答を新しいAIMessageとしてchat_historyに追加し、それを返す形にする。
+    updated_chat_history = chat_history + [AIMessage(content=response.content)]
+
     return AgentState(
         user_input=user_input,
-        chat_history=chat_history + [HumanMessage(content=user_input), AIMessage(content=response.content)],
+        chat_history=updated_chat_history,
         channel_id=state.channel_id,
         thread_id=state.thread_id
     )

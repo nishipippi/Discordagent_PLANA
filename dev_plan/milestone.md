@@ -28,10 +28,16 @@ AIのペルソナ（プラナ）を設定ファイルから読み込み、LangCh
 LangGraphで基本的な会話状態 (State) を定義。 - 完了
 
 
-M1.2: 会話履歴の取得とコンテキスト利用 (LangChain Memory & LangGraph State) - 部分的に完了（会話履歴のコンテキスト利用に課題あり）
+M1.2: 会話履歴の取得とコンテキスト利用 (LangChain Memory & LangGraph State) - 完了
 
-メンションされたチャンネルの直近の会話履歴をlangchain-discordのDiscordReadMessagesツール等で取得し、LangChainのConversationBufferWindowMemory (または同等のメモリコンポーネント) をLangGraphのステートの一部としてユーザーIDごとに管理・永続化する仕組みを実装。 - 部分的に完了（直近のメッセージ履歴は取得できるが、LLMがそれを長期記憶として利用できていない）
-履歴と現在の指示の区別を明確化し、LLMへの入力コンテキストに含める。 - 部分的に完了（履歴はLLMに渡されるが、LLMがそれを記憶として活用できていない）
+メンションされたチャンネルの直近の会話履歴をlangchain-discordのDiscordReadMessagesツール等で取得し、LangChainのConversationBufferWindowMemory (または同等のメモリコンポーネント) をLangGraphのステートの一部としてユーザーIDごとに管理・永続化する仕組みを実装。 - 完了
+履歴と現在の指示の区別を明確化し、LLMへの入力コンテキストに含める。 - 完了
+
+**達成内容:**
+*   会話履歴の永続化のために `tools/db_utils.py` を新規作成し、SQLiteデータベース（`data/memory.db`）に履歴を保存・ロードする機能を実装しました。
+*   `bot.py` の `fetch_chat_history` ノードと `on_message` イベントを修正し、データベース連携と、ユーザー入力・AI応答の履歴への適切な追加を行いました。
+*   `prompts/system_instruction.txt` を更新し、LLMが過去の会話履歴を考慮して応答するように指示を追加しました。
+*   `nodes.py` の `call_llm` ノードを修正し、LLMの応答が `AgentState` の `chat_history` に適切に反映されるようにしました。
 
 
 M1.3: 自律的な検索機能の実装 (LangChain Custom Tool & LangGraph Agent Logic)
