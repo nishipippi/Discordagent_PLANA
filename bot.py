@@ -6,6 +6,7 @@ from langgraph.graph import StateGraph, END
 from state import AgentState
 from nodes import ( # 新しいノードをインポート
     fetch_chat_history,
+    process_attachments_node, # 追加
     decide_tool_or_direct_response_node,
     execute_tool_node,
     generate_final_response_node,
@@ -17,6 +18,8 @@ from langchain_core.messages import HumanMessage, AIMessage
 from tools.db_utils import init_db, load_chat_history, save_chat_history
 from typing import Dict, Optional, Literal, Any, List # List を確認
 import logging # logging をインポート
+import base64 # base64 をインポート
+import aiohttp # aiohttp をインポート (非同期HTTPリクエスト用)
 
 from tools.vector_store_utils import VectorStoreManager
 # llm_config は nodes.py で使用
@@ -64,6 +67,7 @@ workflow = StateGraph(AgentState)
 
 # ノードの追加
 workflow.add_node("fetch_chat_history", fetch_chat_history)
+workflow.add_node("process_attachments", process_attachments_node) # 新しいノードを追加
 workflow.add_node("decide_action", decide_tool_or_direct_response_node)
 workflow.add_node("execute_tool", execute_tool_node)
 workflow.add_node("generate_response", generate_final_response_node)
@@ -72,7 +76,8 @@ workflow.add_node("generate_response", generate_final_response_node)
 workflow.set_entry_point("fetch_chat_history")
 
 # エッジの定義
-workflow.add_edge("fetch_chat_history", "decide_action")
+workflow.add_edge("fetch_chat_history", "process_attachments") # 履歴取得後に添付ファイル処理へ
+workflow.add_edge("process_attachments", "decide_action") # 添付ファイル処理後に判断ノードへ
 
 # decide_action ノードからの条件分岐
 def select_next_node_after_decide_action(state: AgentState) -> Literal["execute_tool", "generate_response"]:
@@ -125,6 +130,44 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
         print(f"Received mention from {message.author.name} in channel {channel_id} (Server: {server_id})")
         print(f"User input: {user_input_text}")
 
+        # 添付ファイルの処理
+        attachments_data = []
+        if message.attachments:
+            print(f"Found {len(message.attachments)} attachments.")
+            for attachment in message.attachments:
+                try:
+                    # ファイルをダウンロード
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(attachment.url) as resp:
+                            if resp.status == 200:
+                                file_bytes = await resp.read()
+                                # Base64エンコード
+                                encoded_content = base64.b64encode(file_bytes).decode('utf-8')
+                                
+                                # 画像ファイルかPDFファイルを判別
+                                if attachment.content_type and attachment.content_type.startswith('image/'):
+                                    attachments_data.append({
+                                        "filename": attachment.filename,
+                                        "content_type": attachment.content_type,
+                                        "content": encoded_content, # Base64エンコードされた画像データ
+                                        "type": "image"
+                                    })
+                                    print(f"Processed image attachment: {attachment.filename}")
+                                elif attachment.content_type == 'application/pdf':
+                                    attachments_data.append({
+                                        "filename": attachment.filename,
+                                        "content_type": attachment.content_type,
+                                        "content": encoded_content, # Base64エンコードされたPDFデータ
+                                        "type": "pdf"
+                                    })
+                                    print(f"Processed PDF attachment: {attachment.filename}")
+                                else:
+                                    print(f"Skipping unsupported attachment type: {attachment.filename} ({attachment.content_type})")
+                            else:
+                                print(f"Failed to download attachment {attachment.filename}: Status {resp.status}")
+                except Exception as e:
+                    print(f"Error processing attachment {attachment.filename}: {e}")
+
         # 既存の会話状態をデータベースからロード
         loaded_chat_history = load_chat_history(channel_id)
         print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id}")
@@ -136,12 +179,9 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
             "channel_id": channel_id,
             "user_id": user_id,
             "thread_id": thread_id,
-            # AgentStateの他のOptionalフィールドはデフォルト(None)になる
+            "attachments": attachments_data, # 添付ファイルデータを追加
         }
         
-        # Pydanticモデルのバリデーションを通過させるために、必須フィールドのみで初期化し、
-        # Optionalなフィールドは後から設定するか、デフォルト値に依存させる。
-        # AgentStateの定義でデフォルト値が設定されていることを確認。
         current_state = AgentState(**initial_state_dict)
 
         try:

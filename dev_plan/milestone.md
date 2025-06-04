@@ -99,11 +99,14 @@ M1.4.4: エージェントへのツール組み込みと動作確認 (LangGraph 
 
 
 フェーズ２：マルチモーダル機能と高度なインタラクションの実装 (LangChain & LangGraph)
-M2.1: PDF・画像の読み込みと理解 (LangChain Multimodal LLM & LangGraph)
+M2.1: PDF・画像の読み込みと理解 (LangChain Multimodal LLM & LangGraph) - **完了**
 
-Discordメッセージに添付されたPDFや画像をLangChain経由でマルチモーダル対応LLM (例: Gemini, GPT-4o) に渡し、内容を理解させる機能をLangGraphのノードとして実装。
-理解した情報を基にユーザーの質問に答えたり、要約したりする機能をLangGraphのフローとして実装。
-
+**達成内容:**
+*   `state.py` に `attachments` フィールドを追加し、添付ファイル情報を保持できるようにしました。
+*   `bot.py` の `on_message` イベントハンドラを修正し、Discordメッセージに添付された画像ファイルとPDFファイルをダウンロードし、Base64エンコードして `AgentState` の `attachments` フィールドに格納するようにしました。
+*   `nodes.py` に `process_attachments_node` を新規追加しました。このノードは `AgentState` の `attachments` を処理し、LLMがマルチモーダル入力として解釈できる形式（画像はBase64エンコードされたimage_url、PDFはBase64エンコードされたmediaデータ）に変換して `chat_history` に追加します。
+*   `bot.py` の LangGraph ワークフローを更新し、`fetch_chat_history` の後に `process_attachments_node` を実行し、その後に `decide_action` に進むようにエッジを設定しました。
+*   `prompts/system_instruction.txt` を更新し、LLMが添付ファイル（画像とPDF）の内容を理解し、それに基づいて応答を生成するよう指示を追加しました。
 
 M2.2: 画像生成機能の実装 (LangChain Image Generation Tool & LangGraph)
 

@@ -30,6 +30,79 @@ def set_bot_instance_for_nodes(bot_instance: commands.Bot):
     global _bot_instance
     _bot_instance = bot_instance
 
+# 新しいノード: 添付ファイルを処理し、LLMへの入力メッセージを構築
+async def process_attachments_node(state: AgentState) -> AgentState:
+    print("--- process_attachments_node ---")
+    attachments = state.attachments
+    input_text = state.input_text
+    chat_history = list(state.chat_history) # 履歴のコピーを作成
+
+    if not attachments:
+        print("No attachments found. Skipping attachment processing.")
+        return state # 添付ファイルがなければ何もしない
+
+    # LLMに渡すためのコンテンツリストを構築
+    # 既存の input_text があればそれも含む
+    content_parts: List[Union[str, Dict[str, Any]]] = []
+    if input_text:
+        content_parts.append({"type": "text", "text": input_text})
+
+    for attachment in attachments:
+        file_type = attachment.get("type")
+        filename = attachment.get("filename", "unknown_file")
+        content_type = attachment.get("content_type", "application/octet-stream")
+        encoded_content = attachment.get("content")
+
+        if file_type == "image" and encoded_content:
+            # 画像の場合、Base64エンコードされたデータをimage_url形式で追加
+            image_url = f"data:{content_type};base64,{encoded_content}"
+            content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
+            print(f"Added image attachment to content: {filename}")
+        elif file_type == "pdf" and encoded_content:
+            # PDFの場合、Base64エンコードされたデータを media タイプとして追加
+            content_parts.append({
+                "type": "media",
+                "mime_type": "application/pdf", # MIMEタイプを明示
+                "data": encoded_content,        # Base64エンコードされたPDFデータ
+            })
+            print(f"Added PDF attachment (Base64) to content_parts for LLM: {filename}")
+        else:
+            print(f"Skipping unsupported attachment type in node: {filename} ({content_type})")
+
+    # 既存のチャット履歴の最後のHumanMessage (元のinput_textのみを含むもの) を置き換えるか、
+    # 新しいマルチモーダルなHumanMessageを履歴の最後に追加する。
+    # bot.py の on_message で input_text を含む HumanMessage が既に追加されているため、
+    # それを pop して、新しい content_parts を持つ HumanMessage を追加する。
+
+    # 最後のメッセージが元の input_text を含む HumanMessage であることを確認
+    # (より堅牢にするには、メッセージIDなどで特定する方が良いが、ここでは簡略化)
+    if chat_history and isinstance(chat_history[-1], HumanMessage) and chat_history[-1].content == input_text:
+         # content が単純な文字列の場合のみ pop する。既にリスト形式の場合は pop しない。
+        if isinstance(chat_history[-1].content, str):
+            print(f"Popping last HumanMessage with simple text content: {input_text}")
+            chat_history.pop()
+
+    # 新しいマルチモーダルHumanMessageを作成して履歴に追加
+    if content_parts: # content_parts が空でない場合のみ追加
+        multimodal_human_message = HumanMessage(content=content_parts)
+        updated_chat_history = chat_history + [multimodal_human_message]
+        print("Created and added new multimodal HumanMessage to chat_history.")
+    else:
+        # content_parts が空の場合 (例: テキスト入力も添付ファイルもなかった場合)
+        # 基本的には on_message で input_text があれば履歴に追加されているはず
+        updated_chat_history = chat_history
+        print("No content_parts to create a new HumanMessage. Using existing chat_history.")
+
+
+    # AgentState を更新して返す
+    current_state_dict = state.model_dump()
+    current_state_dict["chat_history"] = updated_chat_history
+    # input_text はLLMへのメッセージに含められたので、AgentStateのトップレベルからはクリアしても良いが、
+    # decide_tool_or_direct_response_node で利用しているため、残しておく。
+    # current_state_dict["input_text"] = "" # クリアしない
+    current_state_dict["attachments"] = [] # 処理済みなのでクリア
+    return AgentState(**current_state_dict)
+
 # 新しいノード: メッセージ履歴の取得
 async def fetch_chat_history(state: AgentState) -> AgentState:
     print("--- fetch_chat_history ---")

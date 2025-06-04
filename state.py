@@ -20,6 +20,8 @@ class AgentState(BaseModel):
     should_search_decision: Optional[str] = Field(default=None) # 既存
     # --- LLMの直接応答 ---
     llm_direct_response: Optional[str] = Field(default=None) # ツールを使わない場合のLLMの応答
+    # --- For Attachments ---
+    attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="添付ファイルの情報（ファイル名、MIMEタイプ、Base64エンコードされた内容など）")
 
     @field_validator('chat_history', mode='before')
     @classmethod
