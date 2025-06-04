@@ -4,11 +4,11 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from state import AgentState
-from nodes import call_llm
+from nodes import call_llm, should_search_node, execute_search_node # 新しいノードをインポート
 from langchain_core.messages import HumanMessage, AIMessage
 from tools.discord_tools import get_discord_messages
 from tools.db_utils import init_db, load_chat_history, save_chat_history # 追加
-from typing import Dict, Optional # Optionalを追加
+from typing import Dict, Optional, Literal # OptionalとLiteralを追加
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -50,11 +50,29 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
         thread_id=state.thread_id
     )
 
-workflow.add_node("fetch_chat_history", fetch_chat_history)
-workflow.add_node("call_llm", call_llm)
+workflow.add_node("fetch_chat_history", fetch_chat_history) # 既存
+workflow.add_node("should_search", should_search_node)    # 新規
+workflow.add_node("execute_search", execute_search_node)  # 新規
+workflow.add_node("call_llm", call_llm)                   # 既存
 
 workflow.set_entry_point("fetch_chat_history")
-workflow.add_edge("fetch_chat_history", "call_llm")
+workflow.add_edge("fetch_chat_history", "should_search")
+
+def select_next_node_after_should_search(state: AgentState) -> Literal["execute_search", "call_llm"]:
+    if state.should_search_decision == "yes":
+        return "execute_search"
+    else:
+        return "call_llm" # 検索不要なら直接LLMへ
+
+workflow.add_conditional_edges(
+    "should_search",
+    select_next_node_after_should_search,
+    {
+        "execute_search": "execute_search",
+        "call_llm": "call_llm",
+    }
+)
+workflow.add_edge("execute_search", "call_llm")
 workflow.add_edge("call_llm", END)
 
 app = workflow.compile()

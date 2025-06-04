@@ -2,6 +2,7 @@ import os
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from dotenv import load_dotenv
+from langchain_core.output_parsers import StrOutputParser # StrOutputParserをインポート
 
 load_dotenv()
 
@@ -25,4 +26,4 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 
 # LLMチェーンの作成
-llm_chain = prompt | llm
+llm_chain = prompt | llm | StrOutputParser() # StrOutputParserを追加

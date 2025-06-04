@@ -40,11 +40,15 @@ M1.2: 会話履歴の取得とコンテキスト利用 (LangChain Memory & LangG
 *   `nodes.py` の `call_llm` ノードを修正し、LLMの応答が `AgentState` の `chat_history` に適切に反映されるようにしました。
 
 
-M1.3: 自律的な検索機能の実装 (LangChain Custom Tool & LangGraph Agent Logic)
+M1.3: 自律的な検索機能の実装 (LangChain Custom Tool & LangGraph Agent Logic) - 完了
 
-brave-search ライブラリの代わりに requests を使用したカスタム検索ツール (tools/brave_search.py) をLangChainのToolとして定義。
-LangGraphのグラフ内で、ユーザーの指示から検索が必要かを判断するロジック (LLMによる判断ノードや条件付きエッジ) を実装し、Brave Searchカスタムツールを呼び出す。
-検索結果を要約または適切に加工して応答に含める処理をLangGraphのノードとして実装。
+**達成内容:**
+*   `tools/brave_search.py` に `requests` を使用したカスタム検索ツール (`BraveSearchTool`) を実装しました。
+*   `state.py` の `AgentState` に `search_query`, `search_results`, `should_search_decision` フィールドを追加しました。
+*   `nodes.py` に検索要否を判断する `should_search_node` と検索を実行する `execute_search_node` を追加し、`call_llm` ノードを検索結果を利用できるように修正しました。
+*   `bot.py` の LangGraph ワークフローを更新し、`fetch_chat_history` -> `should_search` -> (条件分岐) -> `execute_search` -> `call_llm` のフローを組み込みました。
+*   `prompts/system_instruction.txt` に検索機能に関する指示を追加しました。
+*   Pylanceによる型エラーを解消しました。
 
 
 M1.4: 記憶・想起機能の実装 (LangChain Tools, VectorStore & LangGraph State/Agent Logic)
