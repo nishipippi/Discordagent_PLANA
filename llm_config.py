@@ -19,15 +19,16 @@ def load_system_instruction(file_path: str) -> str:
 
 # LLMの初期化
 llm = ChatGoogleGenerativeAI(
-    model=os.getenv("GEMINI_PRIMARY_MODEL", "gemini-2.0-flash"),
+    model=os.getenv("GEMINI_PRIMARY_MODEL", "gemini-2.5-flash-preview-05-20"), # デフォルト値を .env.template に合わせる
     temperature=0.7,
     google_api_key=os.getenv("GEMINI_API_KEY")
+    # generation_config={"response_mime_type": "application/json"} # with_structured_output を使用するため削除
 )
 
 # プロンプトテンプレートの作成
-system_instruction = load_system_instruction("prompts/system_instruction.txt")
+# system_instruction は動的に渡されるように変更
 prompt = ChatPromptTemplate.from_messages([
-    ("system", system_instruction),
+    ("system", "{system_instruction}"), # ★★★ ここを修正 ★★★
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{user_input}")
 ])

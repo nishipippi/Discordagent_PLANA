@@ -2,8 +2,10 @@ from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 import json
 import logging
+import re # re をインポート
 
-from langchain_core.tools import Tool
+from langchain_core.tools import BaseTool # BaseTool をインポート
+from langchain.tools import StructuredTool # StructuredTool をインポート
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from llm_config import get_google_api_key
@@ -42,7 +44,7 @@ async def remember_information_func(
             logger.error("Google API Key not found.")
             return "エラー: Google APIキーが設定されていません。"
 
-        llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api_key) # モデル名は適宜調整
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-preview-05-20", google_api_key=google_api_key) # モデル名を gemini-1.0-pro に変更
 
         # prompts/structure_memory_prompt.txt の内容を読み込む
         try:
@@ -59,14 +61,24 @@ async def remember_information_func(
         structured_response = await chain.ainvoke({"user_input": text_to_remember})
         structured_data_str = str(structured_response.content) # 明示的にstrにキャスト
 
+        processed_str = "" # 初期化
+        llm_output_str = structured_data_str.strip() # llm_output_str をここで初期化
+
         try:
             # LLMの出力がJSON形式であることを期待
-            structured_data_json = json.loads(structured_data_str)
+            # 正規表現で ```json ... ``` ブロックを抽出
+            match = re.search(r"```json\s*(.*?)\s*```", llm_output_str, re.DOTALL)
+            if match:
+                processed_str = match.group(1).strip()
+            else:
+                # ```json で囲まれていない場合、そのままパースを試みる
+                processed_str = llm_output_str.strip()
+
+            structured_data_json = json.loads(processed_str)
             logger.info(f"Structured data: {structured_data_json}")
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM output as JSON: {structured_data_str} - Error: {e}")
-            # JSONパースに失敗した場合でも、元のテキストと未加工の構造化テキストを保存することを検討
-            structured_data_json = {"raw_structured_text": structured_data_str, "error": "JSON parsing failed"}
+            logger.error(f"Failed to parse LLM output as JSON: '{llm_output_str}' (processed: '{processed_str}') - Error: {e}")
+            structured_data_json = {"raw_structured_text": llm_output_str, "error": "JSON parsing failed"}
 
 
         # 2. データベース保存 (SQLite)
@@ -105,11 +117,13 @@ async def remember_information_func(
         logger.error(f"Error in remember_information_func: {e}", exc_info=True)
         return f"エラーが発生しました: {e}"
 
-remember_tool = Tool(
+remember_tool: BaseTool = StructuredTool.from_function(
+    # func=remember_information_func, # 同期関数用だった場合
     name="remember_information",
-    func=remember_information_func,
     description="ユーザーが指定したテキスト情報を構造化し、データベースとベクトルストアに記憶します。後で思い出せるように情報を保存したい場合に使用します。",
     args_schema=RememberInput,
+    coroutine=remember_information_func, # ★★★ 非同期関数を coroutine に指定 ★★★
+    handle_tool_error=True
 )
 
 async def recall_information_func(
@@ -157,7 +171,7 @@ async def recall_information_func(
         if not google_api_key:
             return "エラー: Google APIキーが設定されていません。"
 
-        llm = ChatGoogleGenerativeAI(model="gemini-pro", google_api_key=google_api_key)
+        llm = ChatGoogleGenerativeAI(model="gemini-1.0-pro", google_api_key=google_api_key) # モデル名を gemini-1.0-pro に変更
         
         try:
             with open("prompts/answer_from_memory_prompt.txt", "r", encoding="utf-8") as f:
@@ -184,9 +198,11 @@ async def recall_information_func(
         logger.error(f"Error during LLM answer generation: {e}", exc_info=True)
         return f"回答生成中にエラーが発生しました: {e}"
 
-recall_tool = Tool(
+recall_tool: BaseTool = StructuredTool.from_function(
+    # func=recall_information_func, # 同期関数用だった場合
     name="recall_information",
-    func=recall_information_func,
     description="以前に記憶した情報に基づいてユーザーの質問に答えたり、関連情報を提供したりします。「〇〇について教えて」「前に話した△△は何だっけ？」のような場合に使用します。",
     args_schema=RecallInput,
+    coroutine=recall_information_func, # ★★★ 非同期関数を coroutine に指定 ★★★
+    handle_tool_error=True
 )

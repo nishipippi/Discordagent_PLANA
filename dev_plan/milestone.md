@@ -76,21 +76,26 @@ tools/memory_tools.py に recall_information_func 関数と対応するPydantic�
 構造化データはSQLiteから、意味的に関連する情報はベクトルストアから検索し、LLMを用いてユーザーの質問に回答を生成するロジックを実装。これをLangChainのToolとしてラップ。
 
 
-M1.4.4: エージェントへのツール組み込みと動作確認 (LangGraph Agent & LangChain Tools)
+M1.4.4: エージェントへのツール組み込みと動作確認 (LangGraph Agent & LangChain Tools) - **完了**
 
-bot.py (またはLangGraphのメイン処理) で、定義した記憶・想起ツール、検索ツールをLangGraphで構築するエージェントのツールリストに含める。
-prompts/structure_memory_prompt.txt と prompts/answer_from_memory_prompt.txt を作成・更新し、LLMによる構造化と回答生成の精度向上を図る (LangChainのChatPromptTemplateとして利用)。
-prompts/system_instruction.txt を更新し、プラナのペルソナ設定と各ツールの利用に関する指示をエージェントのシステムプロンプトに明確化 (LangChainのChatPromptTemplateとして利用)。
-LangGraphのステートとエッジを調整し、記憶・想起フローを確立。
-
-
-現在の課題:
-
-*   **M1.2 の会話履歴のコンテキスト利用の深化:**
-    *   現状の会話履歴（直近のやり取り）の活用に加え、LLMがより長期的な視点で過去の情報を参照し、文脈を理解して応答するための仕組みの改善。
-    *   M1.4 で実装中の「記憶・想起機能」は、ユーザーが明示的に指示した情報を永続化し活用するアプローチであり、これが完成することで「長期記憶」の一側面をカバーすることが期待される。しかし、会話の流れ全体から暗黙的に重要な情報をLLMが判断し、長期記憶として内部的に活用する高度な機能については、引き続き検討が必要。
-*   LangGraphを用いたより複雑な状態遷移と、ユーザーごとのメモリ永続化の堅牢な実装。
-*   ベクトルストアを利用した高度な想起機能のチューニング。
+**達成内容:**
+*   `state.py` の `AgentState` を更新し、ツール呼び出しと結果を管理するためのフィールド (`tool_name`, `tool_args`, `tool_output`, `llm_direct_response`) を追加しました。
+*   `nodes.py` に以下の主要なノードを実装・更新しました。
+    *   `fetch_chat_history`: 会話履歴を取得するノード (botインスタンスへのアクセス方法を調整)。
+    *   `decide_tool_or_direct_response_node`: LLMがツール使用または直接応答を判断するノード。LLMの応答（JSON形式を期待）をパースしてツール呼び出し情報や直接応答を `AgentState` に設定します。
+    *   `execute_tool_node`: 汎用的なツール実行ノード。`AgentState` からツール名と引数を取得し、対応するツールを実行します。
+    *   `generate_final_response_node`: ツール実行結果またはLLMの直接判断に基づいて最終的なユーザーへの応答を生成するノード。
+*   `prompts/system_instruction.txt` を更新し、LLMに対して各ツールの機能説明と、どのような場合にどのツールをどのような引数で呼び出すべきかの具体的な指示（JSON形式での出力指示を含む）を明確化しました。
+*   `bot.py` のLangGraphグラフ構造を更新し、新しいノード (`fetch_chat_history`, `decide_action`, `execute_tool`, `generate_response`) を組み込み、エッジと条件分岐を設定しました。
+*   `tools/memory_tools.py` の `remember_tool` と `recall_tool` を `StructuredTool` を使用するように修正し、非同期関数を `coroutine` 引数に指定しました。また、LLMからのJSON応答をパースする処理を強化しました。
+*   `llm_config.py` の `llm_chain` のプロンプトテンプレートを修正し、`system_instruction` を動的に受け取れるようにしました。
+*   **一連のエラー修正を実施:**
+    *   **LLM出力形式の厳密化:** `prompts/system_instruction.txt` を修正し、LLMが `tool_call` または `direct_response` を確実に出力するように指示を強化しました。
+    *   **Pydanticモデルのバリデーション強化:**
+        *   `state.py` の `ToolCall` モデルで、`args` フィールドが文字列で渡された場合にJSONパースして辞書に変換する `@field_validator` を追加しました。
+        *   `state.py` の `LLMDecisionOutput` モデルで、`tool_call` と `direct_response` の排他性とどちらか一方の存在を強制する `@root_validator` を追加しました。
+    *   **LLMチェーン出力の取り扱い修正:** `nodes.py` の `generate_final_response_node` で、`StrOutputParser` を使用した `llm_chain` の出力（文字列）を正しく扱うように修正しました。
+    *   **これらの修正により、当初発生していた `LLMDecisionOutput did not contain tool_call or direct_response` エラー、Pydanticバリデーションエラー (`tool_call.args Input should be a valid dictionary`)、および `'str' object has no attribute 'content'` エラーが解消され、`remember_information` および `recall_information` ツールを含むエージェントが正常に動作するようになりました。**
 
 
 フェーズ２：マルチモーダル機能と高度なインタラクションの実装 (LangChain & LangGraph)
