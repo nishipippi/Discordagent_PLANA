@@ -10,6 +10,9 @@ from tools.discord_tools import get_discord_messages
 from tools.db_utils import init_db, load_chat_history, save_chat_history # 追加
 from typing import Dict, Optional, Literal # OptionalとLiteralを追加
 
+from tools.vector_store_utils import VectorStoreManager # 新規追加
+from llm_config import get_google_api_key # APIキー取得関数をインポート
+
 # .envファイルから環境変数を読み込む
 load_dotenv()
 
@@ -21,7 +24,26 @@ intents = discord.Intents.default()
 intents.message_content = True  # メッセージ内容の読み取りを許可
 
 # Botのインスタンスを作成
-bot = commands.Bot(command_prefix='!', intents=intents)
+class MyBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vector_store_manager: Optional[VectorStoreManager] = None # ベクトルストアマネージャーを保持
+
+    async def setup_hook(self):
+        # データベースの初期化
+        init_db() # tools.db_utils の init_db を呼び出す
+        print("データベースの準備完了。")
+
+        # ベクトルストアの初期化
+        try:
+            self.vector_store_manager = VectorStoreManager()
+            print("ベクトルストアの準備完了。")
+        except ValueError as e:
+            print(f"ベクトルストアの初期化に失敗しました: {e}")
+        except Exception as e:
+            print(f"予期せぬエラーでベクトルストアの初期化に失敗: {e}")
+
+bot = MyBot(command_prefix='!', intents=intents)
 
 # LangGraphグラフの構築
 workflow = StateGraph(AgentState)
@@ -80,7 +102,12 @@ app = workflow.compile()
 @bot.event
 async def on_ready():
     print(f'Botとしてログインしました: {bot.user}')
-    init_db() # データベースの初期化を追加
+    # init_db() は setup_hook に移動したため、ここでの呼び出しは不要
+
+    if bot.vector_store_manager:
+        print("VectorStoreManager は正常に初期化されています。")
+    else:
+        print("警告: VectorStoreManager が初期化されていません。記憶・想起機能が動作しない可能性があります。")
 
 @bot.event
 async def on_message(message):

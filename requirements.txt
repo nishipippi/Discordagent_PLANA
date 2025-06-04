@@ -10,3 +10,4 @@ faiss-cpu
 APScheduler
 langchain-discord-shikenso
 Pillow
+langchain-community

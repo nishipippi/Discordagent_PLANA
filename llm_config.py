@@ -6,6 +6,13 @@ from langchain_core.output_parsers import StrOutputParser # StrOutputParserを�
 
 load_dotenv()
 
+def get_google_api_key() -> str:
+    """Google APIキーを環境変数から取得する"""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY 環境変数が設定されていません。")
+    return api_key
+
 def load_system_instruction(file_path: str) -> str:
     with open(file_path, 'r', encoding='utf-8') as f:
         return f.read()

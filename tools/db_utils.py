@@ -20,6 +20,21 @@ def init_db():
             PRIMARY KEY (channel_id, message_index)
         )
     """)
+    # 構造化記憶テーブル
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS memories (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        server_id TEXT NOT NULL,
+        channel_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(server_id, channel_id, user_id, key)
+    )
+    ''')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_memories_user_key ON memories (user_id, key)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_memories_server_channel ON memories (server_id, channel_id)')
     conn.commit()
     conn.close()
 
