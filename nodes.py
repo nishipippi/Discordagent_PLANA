@@ -6,6 +6,7 @@ from state import AgentState, ToolCall, LLMDecisionOutput # 新しく定義し�
 from llm_config import llm_chain, llm # llm_modelをllmに変更
 from tools.brave_search import BraveSearchTool # BraveSearchToolをインポート
 from tools.memory_tools import remember_tool, recall_tool # 新規追加した記憶・想起ツールをインポート
+from tools.image_generation_tools import image_generation_tool # 画像生成ツールをインポート
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool # BaseTool クラスをインポート
 
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__) # logger を定義
 brave_search_tool = BraveSearchTool()
 
 # 利用可能なツールをリストとしてまとめる (nodes.py 内で定義)
-available_tools: List[BaseTool] = [brave_search_tool, remember_tool, recall_tool]
+available_tools: List[BaseTool] = [brave_search_tool, remember_tool, recall_tool, image_generation_tool]
 tool_map: Dict[str, BaseTool] = {tool.name: tool for tool in available_tools}
 
 import discord # discord.py の型ヒントのため
@@ -409,6 +410,12 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
 
     updated_chat_history = current_chat_history_at_entry + [AIMessage(content=final_response_content)]
 
+    # 画像生成ツールの出力であれば、image_output_base64 に格納
+    image_output_base64: Optional[str] = None
+    if tool_name == "image_generation_tool" and tool_output and not tool_output.startswith("エラー:"):
+        image_output_base64 = tool_output
+        final_response_content = "画像を生成しました！" # 画像生成成功時のメッセージ
+
     return AgentState(
         input_text=input_text,
         chat_history=updated_chat_history,
@@ -419,7 +426,8 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
         llm_direct_response=final_response_content,
         tool_name=None,
         tool_args=None,
-        tool_output=None,
+        tool_output=None, # ツール出力は処理済みなのでクリア
+        image_output_base64=image_output_base64, # 画像データを格納
         search_query=None,
         search_results=None,
         should_search_decision=None

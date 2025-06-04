@@ -22,6 +22,8 @@ class AgentState(BaseModel):
     llm_direct_response: Optional[str] = Field(default=None) # ツールを使わない場合のLLMの応答
     # --- For Attachments ---
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="添付ファイルの情報（ファイル名、MIMEタイプ、Base64エンコードされた内容など）")
+    # --- For Image Generation Output ---
+    image_output_base64: Optional[str] = Field(default=None, description="生成された画像のBase64エンコードデータ")
 
     @field_validator('chat_history', mode='before')
     @classmethod

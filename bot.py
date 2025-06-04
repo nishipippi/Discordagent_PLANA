@@ -19,6 +19,7 @@ from tools.db_utils import init_db, load_chat_history, save_chat_history
 from typing import Dict, Optional, Literal, Any, List # List を確認
 import logging # logging をインポート
 import base64 # base64 をインポート
+import io # io をインポート
 import aiohttp # aiohttp をインポート (非同期HTTPリクエスト用)
 
 from tools.vector_store_utils import VectorStoreManager
@@ -209,7 +210,18 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
             save_chat_history(channel_id, history_to_save)
             print(f"Saved {len(history_to_save)} messages to history for channel {channel_id}")
 
-            await message.channel.send(f'{message.author.mention} {ai_response_content}')
+            # 画像生成結果があれば画像を送信
+            if final_state.image_output_base64:
+                try:
+                    image_bytes = base64.b64decode(final_state.image_output_base64)
+                    image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
+                    await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file)
+                    print("Generated image sent to Discord.")
+                except Exception as img_e:
+                    print(f"Error sending image to Discord: {img_e}")
+                    await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)')
+            else:
+                await message.channel.send(f'{message.author.mention} {ai_response_content}')
 
         except Exception as e:
             print(f"LangGraphの実行中にエラーが発生しました: {e}") # exc_info=True を削除
