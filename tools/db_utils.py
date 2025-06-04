@@ -1,7 +1,7 @@
 import sqlite3
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 DATABASE_PATH = "data/memory.db"
@@ -71,3 +71,43 @@ def load_chat_history(channel_id: int) -> List[BaseMessage]:
             messages.append(AIMessage(content=content))
     conn.close()
     return messages
+
+def save_memory(
+    user_id: str,
+    server_id: str,
+    channel_id: str,
+    original_text: str,
+    structured_data: str # JSON文字列として受け取る
+) -> Optional[int]:
+    """
+    構造化された記憶をデータベースに保存する。
+    """
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    memory_key: Optional[str] = None # 初期化
+    try:
+        # structured_data (JSON文字列) から key を抽出
+        # 例: summary を key として使用
+        structured_json = json.loads(structured_data)
+        memory_key = structured_json.get("summary", original_text[:50] + "..." if len(original_text) > 50 else original_text)
+
+        cursor.execute(
+            """
+            INSERT INTO memories (server_id, channel_id, user_id, key, value)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (server_id, channel_id, user_id, memory_key, structured_data)
+        )
+        conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError:
+        # UNIQUE制約違反の場合 (同じserver_id, channel_id, user_id, keyの組み合わせが既に存在)
+        # memory_key が None の可能性があるのでチェック
+        key_info = f"key '{memory_key}'" if memory_key else "an unknown key"
+        print(f"Warning: Memory with {key_info} already exists for user {user_id} in {server_id}/{channel_id}. Skipping insertion.")
+        return None
+    except Exception as e:
+        print(f"Error saving memory to DB: {e}")
+        return None
+    finally:
+        conn.close()
