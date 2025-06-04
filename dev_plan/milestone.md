@@ -53,11 +53,14 @@ M1.3: 自律的な検索機能の実装 (LangChain Custom Tool & LangGraph Agent
 
 M1.4: 記憶・想起機能の実装 (LangChain Tools, VectorStore & LangGraph State/Agent Logic)
 
-M1.4.1: データベース基盤の準備 (SQLite & VectorStore)
+M1.4.1: データベース基盤の準備 (SQLite & VectorStore) - 完了
 
-tools/db_utils.py を作成し、SQLiteデータベース (data/memory.db) の初期化と構造化データ用テーブル (memories) の作成を実装。
-長期記憶・意味的想起のために、LangChainがサポートするベクトルストア (例: Chroma, FAISS をSQLite等で永続化) のセットアップを検討・実装。
-bot.py (またはLangGraphの初期化処理) でデータベースとベクトルストアが初期化されるように連携。
+**達成内容:**
+*   `tools/db_utils.py` を更新し、構造化された記憶を保存するための `memories` テーブルを SQLite データベース (`data/memory.db`) に追加しました。
+*   `tools/vector_store_utils.py` を新規作成し、FAISS と Google Generative AI Embeddings (`models/embedding-001`) を使用したベクトルストア管理クラス (`VectorStoreManager`) を実装しました。ベクトルストアのデータは `data/vector_store/faiss_index_gemini` に永続化されます。
+*   `llm_config.py` に `get_google_api_key` 関数を追加し、APIキーの取得方法を統一しました。
+*   `bot.py` を更新し、Bot起動時に `setup_hook` を使用して SQLite データベース (`memories` テーブルを含む) と `VectorStoreManager` が初期化されるようにしました。
+*   `tools/vector_store_utils.py` で発生していた `ImportError` を、インポートパスを修正することで解決しました。
 
 
 M1.4.2: 記憶ツール (remember_information) の実装 (LangChain Tool & LangGraph)
@@ -83,9 +86,11 @@ LangGraphのステートとエッジを調整し、記憶・想起フローを�
 
 現在の課題:
 
-LangGraphを用いたより複雑な状態遷移と、ユーザーごとのメモリ永続化の堅牢な実装。
-ベクトルストアを利用した高度な想起機能のチューニング。
-M1.2: 会話履歴のコンテキスト利用において、LLMが過去の会話内容を長期記憶として活用できていない。これは、プロンプトの指示不足、またはLangGraphのState管理とLLMへのコンテキスト渡し方の改善が必要である可能性を示唆している。
+*   **M1.2 の会話履歴のコンテキスト利用の深化:**
+    *   現状の会話履歴（直近のやり取り）の活用に加え、LLMがより長期的な視点で過去の情報を参照し、文脈を理解して応答するための仕組みの改善。
+    *   M1.4 で実装中の「記憶・想起機能」は、ユーザーが明示的に指示した情報を永続化し活用するアプローチであり、これが完成することで「長期記憶」の一側面をカバーすることが期待される。しかし、会話の流れ全体から暗黙的に重要な情報をLLMが判断し、長期記憶として内部的に活用する高度な機能については、引き続き検討が必要。
+*   LangGraphを用いたより複雑な状態遷移と、ユーザーごとのメモリ永続化の堅牢な実装。
+*   ベクトルストアを利用した高度な想起機能のチューニング。
 
 
 フェーズ２：マルチモーダル機能と高度なインタラクションの実装 (LangChain & LangGraph)
