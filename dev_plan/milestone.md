@@ -108,10 +108,24 @@ M2.1: PDF・画像の読み込みと理解 (LangChain Multimodal LLM & LangGraph
 *   `bot.py` の LangGraph ワークフローを更新し、`fetch_chat_history` の後に `process_attachments_node` を実行し、その後に `decide_action` に進むようにエッジを設定しました。
 *   `prompts/system_instruction.txt` を更新し、LLMが添付ファイル（画像とPDF）の内容を理解し、それに基づいて応答を生成するよう指示を追加しました。
 
-M2.2: 画像生成機能の実装 (LangChain Image Generation Tool & LangGraph)
+M2.2: 画像生成機能の実装 (LangChain Image Generation Tool & LangGraph) - **一部完了**
 
 「〇〇の画像を生成して」という指示をLangGraphのルーティングロジックで認識し、LangChainの画像生成ツール (例: OpenAIDALLEImageGenerationTool やカスタムツール) を呼び出す。
 生成された画像をDiscordメッセージとして投稿する処理を実装 (langchain-discord の DiscordSendMessageTool または discord.py 直接呼び出し)。
+
+**達成内容:**
+*   ユーザーの指示に基づいて `image_generation_tool` を呼び出し、画像を生成してDiscordに投稿する基本的なフローを実装しました。
+*   **LLMへの入力トークン数超過問題への対処:**
+    *   `nodes.py` の `decide_tool_or_direct_response_node`（行動判断ノード）および `generate_final_response_node`（最終応答生成ノード）において、LLMに渡す会話履歴 (`chat_history`) に含まれる過去の添付ファイルのBase64エンコードデータを簡略化（テキスト部分のみを抽出するか、固定の代替文字列に置換）する処理を実装しました。
+    *   特に `generate_final_response_node` では、画像生成ツールが成功した場合、新たに生成された画像のBase64データをLLMに渡すことなく、ユーザーへのテキスト応答は「画像を生成しました！」のような固定メッセージとし、LLMの呼び出し自体をスキップするように修正しました。この判断は、`tool_output` がエラーメッセージで始まらないことを基準に行います。
+*   **LLMの出力形式に関する問題への対処:**
+    *   LLMがツール呼び出しの引数を誤った形式（例：シングルクォート使用）で出力し、Pydanticモデルのバリデーションエラーが発生していた問題に対し、`prompts/system_instruction.txt` 内の指示をより明確にし、引数を厳密なJSON形式（全てのキーと文字列値をダブルクォートで囲む）で出力するよう強く促す記述に変更しました。
+    *   LLMがツール呼び出し (`tool_call`) も直接応答 (`direct_response`) も返さないというPydanticバリデーションエラーに対し、`prompts/system_instruction.txt` に、判断に迷う場合や指示が曖昧な場合でも、必ず `direct_response` を用いて何らかの応答（例：明確化のための質問）をするようフォールバック指示を追加しました。
+
+**今後の課題 (ログより抽出):**
+*   **Pydantic v1非推奨警告 (`LangChainDeprecationWarning`):**
+    *   内容: `langchain_core.pydantic_v1` の使用に関する警告。LangChainが内部的にPydantic v2を使用するようになったため、互換シムであるv1モジュールは非推奨となっています。
+    *   対応: プロジェクト全体でPydantic v2への移行を計画し、`from langchain_core.pydantic_v1 import BaseModel` のようなインポートを `from pydantic import BaseModel` （またはPydantic v2環境でv1互換のコードを扱う場合は `from pydantic.v1 import BaseModel`）に更新する必要があります。
 
 
 M2.3: タイマー・アラーム機能の実装 (LangChain Custom Tool, LangGraph & Scheduling)
@@ -176,3 +190,12 @@ Botの稼働監視 (LangSmithの活用)。
 LangChainとLangGraphの活用: LangChainのAgent, Tools, Chains, Memoryなどのコンポーネントと、LangGraphによる状態管理、フロー制御、エージェントオーケストレーションを最大限に活用することで、複雑な処理をモジュール化し、開発効率と堅牢性を高めます。
 プロンプトエンジニアリング: LLMの能力を最大限に引き出すために、各機能におけるプロンプト (LangChainのChatPromptTemplate等) の設計とチューニングが鍵となります。
 テストの重要性: 特に自然言語処理と外部API連携、LangGraphによる状態遷移が複雑に絡むため、予期せぬ挙動を防ぐために十分なテストが必要です。
+
+
+プロジェクト改善のためのオプション修正(優先度低)
+*   **PyNaCl未インストール警告:**
+    *   内容: `PyNaCl is not installed, voice will NOT be supported`。音声関連機能（Discordのボイスチャットなど）が利用できない状態です。
+    *   対応: 将来的に音声機能の実装を検討する場合は、PyNaClライブラリをインストールする必要があります。現状、テキストベースの機能のみであれば影響は限定的です。
+*   **FAISS GPU非対応情報:**
+    *   内容: `Failed to load GPU Faiss: name 'GpuIndexIVFFlat' is not defined.`。GPU版FAISSのロードに失敗し、CPU版で動作していることを示しています。
+    *   対応: 現在のベクトルストアのデータ量や検索パフォーマンスに問題がなければ、CPU版のままでも問題ありません。将来的にパフォーマンスがボトルネックになるようであれば、GPU環境の整備とGPU版FAISSのセットアップを検討する価値があります。
