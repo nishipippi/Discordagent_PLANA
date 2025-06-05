@@ -131,8 +131,8 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
     # 既存のチャット履歴にプレフィックス付きの新しいメッセージを追加
     updated_chat_history = state.chat_history + prefixed_new_messages
     
-    # 履歴の長さを制限 (例: 最新の5件を保持)
-    max_history_length = 5
+    # 履歴の長さを制限 (例: 最新の1件を保持)
+    max_history_length = 1
     if len(updated_chat_history) > max_history_length:
         updated_chat_history = updated_chat_history[-max_history_length:]
 

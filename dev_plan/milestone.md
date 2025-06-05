@@ -96,6 +96,15 @@ M1.4.4: エージェントへのツール組み込みと動作確認 (LangGraph 
         *   `state.py` の `LLMDecisionOutput` モデルで、`tool_call` と `direct_response` の排他性とどちらか一方の存在を強制する `@root_validator` を追加しました。
     *   **LLMチェーン出力の取り扱い修正:** `nodes.py` の `generate_final_response_node` で、`StrOutputParser` を使用した `llm_chain` の出力（文字列）を正しく扱うように修正しました。
     *   **これらの修正により、当初発生していた `LLMDecisionOutput did not contain tool_call or direct_response` エラー、Pydanticバリデーションエラー (`tool_call.args Input should be a valid dictionary`)、および `'str' object has no attribute 'content'` エラーが解消され、`remember_information` および `recall_information` ツールを含むエージェントが正常に動作するようになりました。**
+    *   **ベクトルストア永続化問題の解決 (2025-06-05):**
+        *   **問題点:** `remember_information` ツールで記憶した情報が、Bot再起動後に `recall_information` ツールで想起できない問題が発生していました。原因は、FAISSベクトルストアのファイルがディスクに正しく永続化されていなかったためです。
+        *   **調査と対応:**
+            *   `VectorStoreManager` のインスタンスがツール呼び出しごとに再作成されていた問題を修正し、Bot全体で単一のインスタンスを共有するように変更しました。
+            *   LLMモデル名のタイプミス (`gemini-1.5-flash-preview-0514` -> `gemini-2.5-flash-preview-05-20`) を修正し、Google APIからの404エラーを解消しました。
+            *   ベクトルストアの保存パスを絶対パスに正規化し、さらにプロジェクト内の `data` ディレクトリ配下で管理するように変更しました。
+            *   LangChainのFAISSラッパー (`FAISS.save_local`, `FAISS.load_local`) の引数の渡し方を、フォルダパスとインデックス名を明示的に指定する標準的な方法に修正しました。
+            *   詳細なデバッグログを追加し、ファイルI/Oの状況を追跡できるようにしました。
+        *   **重要なポイント:** Windows環境におけるFAISSのファイル永続化では、パスの指定方法や `save_local` の挙動に注意が必要であることが判明しました。最終的に、LangChainの標準的な使用方法に準拠したパス指定とメソッド呼び出しに修正することで、ベクトルストアのファイルが正しくディスクに保存され、再起動後もロードできるようになり、記憶・想起機能が安定して動作するようになりました。
 
 
 フェーズ２：マルチモーダル機能と高度なインタラクションの実装 (LangChain & LangGraph)

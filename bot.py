@@ -25,9 +25,9 @@ import aiohttp # aiohttp をインポート (非同期HTTPリクエスト用)
 
 from tools.vector_store_utils import VectorStoreManager
 from tools.brave_search import BraveSearchTool # BraveSearchTool クラスをインポート
-from tools.memory_tools import remember_tool, recall_tool
+from tools.memory_tools import create_memory_tools # <<< 変更: create_memory_tools をインポート
 from tools.image_generation_tools import image_generation_tool
-from langchain_core.tools import BaseTool # BaseTool をインポート
+from langchain_core.tools import BaseTool
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -47,39 +47,52 @@ intents.message_content = True  # メッセージ内容の読み取りを許可
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.vector_store_manager: Optional[VectorStoreManager] = None # ベクトルストアマネージャーを保持
+        self.vector_store_manager: Optional[VectorStoreManager] = None
+        self.tool_map: Dict[str, BaseTool] = {} # Botインスタンスにツールマップを持たせる
 
     async def setup_hook(self):
         # データベースの初期化
-        init_db() # tools.db_utils の init_db を呼び出す
+        init_db()
         print("データベースの準備完了。")
 
         # ベクトルストアの初期化
         try:
-            self.vector_store_manager = VectorStoreManager()
+            self.vector_store_manager = VectorStoreManager() # ここで初期化
             print("ベクトルストアの準備完了。")
+
+            # VectorStoreManager が初期化された後にツールを準備
+            if self.vector_store_manager:
+                remember_tool_instance, recall_tool_instance = create_memory_tools(self.vector_store_manager)
+                temp_tools = [
+                    BraveSearchTool(),
+                    remember_tool_instance,
+                    recall_tool_instance,
+                    image_generation_tool,
+                    create_timer_tool(self) # self (botインスタンス) を渡す
+                ]
+                self.tool_map = {tool.name: tool for tool in temp_tools}
+                set_bot_instance_for_nodes(self, self.tool_map) # ノードにツールマップを設定
+                print("ツールマップが正常に初期化されました。")
+            else:
+                # VectorStoreManager がない場合のフォールバック (記憶ツールなし)
+                print("警告: VectorStoreManager が初期化できなかったため、記憶・想起ツールは利用できません。")
+                temp_tools = [
+                    BraveSearchTool(),
+                    image_generation_tool,
+                    create_timer_tool(self)
+                ]
+                self.tool_map = {tool.name: tool for tool in temp_tools}
+                set_bot_instance_for_nodes(self, self.tool_map)
+
+
         except ValueError as e:
             print(f"ベクトルストアの初期化に失敗しました: {e}")
         except Exception as e:
-            print(f"予期せぬエラーでベクトルストアの初期化に失敗: {e}")
+            logger.exception(f"予期せぬエラーでベクトルストアの初期化に失敗: {e}")
 
 bot = MyBot(command_prefix='!', intents=intents)
 
-# すべてのツールをリストにまとめる
-# botインスタンスを必要とするツールはここで初期化
-ALL_TOOLS: List[BaseTool] = [
-    BraveSearchTool(),
-    remember_tool,
-    recall_tool,
-    image_generation_tool,
-    create_timer_tool(bot) # botインスタンスを渡してタイマーツールを作成
-]
-tool_map: Dict[str, BaseTool] = {tool.name: tool for tool in ALL_TOOLS} # tool_map を作成
-
-set_bot_instance_for_nodes(bot, tool_map) # botインスタンスとtool_mapをnodes.pyに渡す
-
-# LangGraphグラフの構築
-workflow = StateGraph(AgentState)
+# ALL_TOOLS と tool_map のグローバルな定義は削除し、botインスタンスの属性として管理
 
 # LangGraphグラフの構築
 workflow = StateGraph(AgentState)
