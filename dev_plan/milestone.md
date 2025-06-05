@@ -155,10 +155,24 @@ LangGraphのエージェントがこのツールを呼び出し、設定時刻�
 
 
 フェーズ３：ユーザーエクスペリエンス向上と洗練化 (LangChain & LangGraph)
-M3.1: フォローアップ質問選択肢の提供 (LangChain & Discord UI via LangGraph)
+M3.1: フォローアップ質問選択肢の提供 (LangChain & Discord UI via LangGraph) - **完了**
 
 AIの応答後、LangChain (またはLLMの直接的な機能) を利用して文脈に沿ったフォローアップ質問を3つ生成する機能をLangGraphのノードとして実装。
 生成された質問をDiscordのボタンコンポーネントとして表示し、ユーザーが選択できるようにする (LangGraphから discord.py のUI機能を呼び出す)。
+
+**達成内容:**
+*   `state.py` の `AgentState` に `followup_questions` フィールドを追加し、生成されたフォローアップ質問を保持できるようにしました。
+*   `prompts/generate_followup_prompt.txt` を新規作成し、LLMにフォローアップ質問を生成させるための指示を定義しました。
+*   `nodes.py` に `generate_followup_questions_node` を新規追加しました。このノードは、AIの最終応答と会話履歴に基づき、LLMを使用して最大3つのフォローアップ質問をJSON形式で生成します。
+*   `bot.py` のLangGraphワークフローを更新し、`generate_final_response_node` の後に `generate_followup_questions_node` を実行するようにエッジを設定しました。
+*   `bot.py` の `on_message` イベントハンドラおよび `FollowupButton` クラスの `callback` メソッドを修正し、AIの応答メッセージにフォローアップ質問をDiscordのUIボタンとして表示する機能を追加しました。
+    *   ボタンは `discord.ui.View` と `discord.ui.Button` を使用して実装されています。
+    *   ユーザーがフォローアップ質問ボタンをクリックすると、その質問テキストが新たなユーザー入力として扱われ、再度LangGraphワークフローが実行され、会話が継続されます。
+    *   ボタンクリック後は、元のメッセージのボタンが無効化されるようにしました。
+    *   ボタンのスタイルを `discord.ButtonStyle.secondary` に変更し、Discordのダークテーマでより背景に馴染むように調整しました。
+*   関連するエラー修正:
+    *   フォローアップボタンクリック後の処理で発生していた `discord.ui.ActionRow` の参照エラーを修正しました (`isinstance(item, discord.ActionRow)` を使用)。
+    *   フォローアップボタンクリック後の応答にも、さらにフォローアップボタンが表示されるように修正しました。
 
 
 M3.2: 意図解釈とツール使用判断の高度化 (LangChain Prompting, LangGraph Routing)
