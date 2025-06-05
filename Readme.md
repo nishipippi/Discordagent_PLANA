@@ -26,17 +26,15 @@
     *   discord.py
     *   langchain
     *   langgraph
-    *   langchain-openai / langchain-google-genai
-    *   google-generativeai (Gemini利用時)
+    *   langchain-google-genai
+    *   google-genai (Gemini利用時)
     *   requests (Brave Search API直接コール時)
     *   ベクトルストアライブラリ (Chroma, FAISSなど)
     *   データベース操作ライブラリ (sqlite3など)
     *   langchain-discord-shikenso
 *   **AIモデル**:
-    *   Google Gemini (Flash) または OpenAI GPTシリーズ
-    *   Google Gemini (画像生成用) または DALL-E
+    *   Google Gemini
 *   **外部API**:
-    *   LLM API (Google GenAI API, OpenAI APIなど)
     *   Brave Search API
 *   **データベース**:
     *   SQLite
@@ -58,7 +56,7 @@
     ```
 2.  必要なAPIキーを設定します。`.env.template` をコピーして `.env` ファイルを作成し、以下の情報を記述してください。
     *   `DISCORD_BOT_TOKEN`: Discord Botのトークン
-    *   `OPENAI_API_KEY` (または `GOOGLE_API_KEY` など、使用するLLMに応じて): LLMのAPIキー
+    *    `GOOGLE_API_KEY`: LLMのAPIキー
     *   `BRAVE_API_KEY`: Brave Search APIのキー
     *   その他、必要なAPIキーや設定値
 
