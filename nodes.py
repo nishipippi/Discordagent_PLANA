@@ -371,22 +371,33 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             raise ValueError("Tool arguments are None.")
         # ツールを実行 (非同期ツールを想定)
         # tool.ainvoke は辞書を引数として受け取り、args_schema に基づいて処理する
-        tool_output = await tool.ainvoke(tool_args)
-        print(f"Tool '{tool_name}' executed. Output: {str(tool_output)[:100]}...") # 出力の一部を表示
+        tool_output_result = await tool.ainvoke(tool_args) # 変数名を変更
+        print(f"Tool '{tool_name}' executed. Output: {str(tool_output_result)[:100]}...") # 出力の一部を表示
     except Exception as e:
         logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
-        tool_output = f"エラー: ツール '{tool_name}' の実行中に問題が発生しました: {e}"
+        tool_output_result = f"エラー: ツール '{tool_name}' の実行中に問題が発生しました: {e}" # 変数名を変更
 
-    return AgentState(
-        input_text=input_text,
-        chat_history=chat_history,
-        server_id=server_id,
-        channel_id=channel_id,
-        user_id=user_id,
-        tool_output=tool_output,
-        tool_name=None, # ツール実行後はツール情報をクリア
-        tool_args=None
-    )
+    # AgentStateの更新
+    current_state_dict = state.model_dump() # model_dump() を使用
+
+    # web_searchツールの結果を特別扱い
+    if tool_name == "web_search" and isinstance(tool_output_result, list):
+        current_state_dict["search_results"] = tool_output_result
+        # tool_output には、検索結果の要約や「検索を実行しました」などの文字列を入れることを検討
+        # ここでは一旦、最初の検索結果のタイトルとURLを文字列として格納する例
+        if tool_output_result:
+            first_result = tool_output_result[0]
+            current_state_dict["tool_output"] = f"検索結果: {first_result.get('title', '')} - {first_result.get('url', '')}"
+        else:
+            current_state_dict["tool_output"] = "検索結果はありませんでした。"
+    else:
+        # 他のツール、またはweb_searchが文字列を返した場合
+        current_state_dict["tool_output"] = str(tool_output_result) # 文字列に変換して格納
+
+    current_state_dict["tool_name"] = None # ツール実行後はツール情報をクリア
+    current_state_dict["tool_args"] = None # ツール実行後はツール情報をクリア
+    
+    return AgentState(**current_state_dict)
 
 # generate_final_response_node (ツール結果を用いた応答生成ノード)
 async def generate_final_response_node(state: AgentState) -> AgentState:
