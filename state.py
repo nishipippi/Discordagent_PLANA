@@ -25,6 +25,9 @@ class AgentState(BaseModel):
     # --- For Image Generation Output ---
     image_output_base64: Optional[str] = Field(default=None, description="生成された画像のBase64エンコードデータ")
     followup_questions: Optional[List[str]] = Field(default=None, description="AIによって生成されたフォローアップ質問のリスト")
+    # --- For Progress Message ---
+    progress_message_id: Optional[int] = Field(default=None, description="思考中の進捗を表示するDiscordメッセージのID")
+    progress_channel_id: Optional[int] = Field(default=None, description="思考中の進捗を表示するDiscordメッセージが送信されたチャンネルのID")
 
     @field_validator('chat_history', mode='before')
     @classmethod

@@ -4,19 +4,13 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from state import AgentState
-import os
-import discord
-from discord.ext import commands
-from dotenv import load_dotenv
-from langgraph.graph import StateGraph, END
-from state import AgentState
 from nodes import (
     fetch_chat_history,
     process_attachments_node,
     decide_tool_or_direct_response_node,
     execute_tool_node,
     generate_final_response_node,
-    generate_followup_questions_node, # <<< 追加
+    generate_followup_questions_node,
     set_bot_instance_for_nodes
 )
 from langchain_core.messages import HumanMessage, AIMessage
@@ -33,7 +27,7 @@ from tools.brave_search import BraveSearchTool
 from tools.memory_tools import create_memory_tools
 from tools.image_generation_tools import image_generation_tool
 from langchain_core.tools import BaseTool
-from discord.ui import View, Button # discord.ui をインポート
+from discord.ui import View, Button
 
 load_dotenv()
 
@@ -95,7 +89,7 @@ workflow.add_node("process_attachments", process_attachments_node)
 workflow.add_node("decide_action", decide_tool_or_direct_response_node)
 workflow.add_node("execute_tool", execute_tool_node)
 workflow.add_node("generate_response", generate_final_response_node)
-workflow.add_node("generate_followups", generate_followup_questions_node) # <<< 追加
+workflow.add_node("generate_followups", generate_followup_questions_node)
 
 workflow.set_entry_point("fetch_chat_history")
 
@@ -120,14 +114,14 @@ workflow.add_conditional_edges(
 )
 
 workflow.add_edge("execute_tool", "generate_response")
-workflow.add_edge("generate_response", "generate_followups") # <<< 変更: 最終応答生成後にフォローアップ生成へ
-workflow.add_edge("generate_followups", END) # <<< 変更: フォローアップ生成後に終了
+workflow.add_edge("generate_response", "generate_followups")
+workflow.add_edge("generate_followups", END)
 
 app = workflow.compile()
 
 class FollowupButton(Button):
     def __init__(self, label: str, custom_id: str, bot_instance: MyBot):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id) # 修正
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id)
         self.bot_instance = bot_instance
 
     async def callback(self, interaction: discord.Interaction):
@@ -141,7 +135,15 @@ class FollowupButton(Button):
         user_id = str(interaction.user.id)
         thread_id = interaction.channel.id if isinstance(interaction.channel, discord.Thread) else None
 
-        await interaction.response.send_message(f"`{user_input_text}` について考え中です...", ephemeral=True)
+        progress_message: Optional[discord.Message] = None
+        try:
+            progress_message = await interaction.channel.send(f"{interaction.user.mention} `{user_input_text}` について考え中です...")
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            print(f"進捗メッセージの送信に失敗 (FollowupButton): {e}")
+            if not interaction.response.is_done():
+                 await interaction.response.send_message("処理を開始できませんでした。", ephemeral=True)
+            return
 
         loaded_chat_history = load_chat_history(channel_id)
         print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id} (Followup)")
@@ -154,6 +156,8 @@ class FollowupButton(Button):
             "user_id": user_id,
             "thread_id": thread_id,
             "attachments": [],
+            "progress_message_id": progress_message.id if progress_message else None,
+            "progress_channel_id": progress_message.channel.id if progress_message else None,
         }
         current_state = AgentState(**initial_state_dict)
 
@@ -162,6 +166,16 @@ class FollowupButton(Button):
             final_state_dict = await app.ainvoke(current_state.model_dump())
             final_state = AgentState(**final_state_dict)
             print("LangGraph app finished for followup.")
+
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except discord.NotFound:
+                    print("進捗メッセージが見つからず削除できませんでした (FollowupButton)。")
+                except discord.Forbidden:
+                    print("進捗メッセージの削除権限がありません (FollowupButton)。")
+                except Exception as e:
+                    print(f"進捗メッセージの削除中にエラー (FollowupButton): {e}")
 
             ai_response_content = final_state.llm_direct_response
             if not ai_response_content:
@@ -179,7 +193,7 @@ class FollowupButton(Button):
                         FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=self.bot_instance)
                     )
             
-            response_message = await interaction.channel.send(
+            await interaction.followup.send(
                 f'{interaction.user.mention} {ai_response_content}', 
                 view=followup_view_after_button_click
             )
@@ -190,7 +204,7 @@ class FollowupButton(Button):
                     if isinstance(item, discord.ActionRow):
                         for child in item.children:
                             if isinstance(child, discord.ui.Button):
-                                new_button = Button(label=child.label, style=discord.ButtonStyle.secondary, custom_id=child.custom_id, disabled=True) # 修正
+                                new_button = Button(label=child.label, style=discord.ButtonStyle.secondary, custom_id=child.custom_id, disabled=True)
                                 disabled_view.add_item(new_button)
                 try:
                     await interaction.message.edit(view=disabled_view)
@@ -199,7 +213,15 @@ class FollowupButton(Button):
 
         except Exception as e:
             print(f"LangGraphの実行中にエラーが発生しました (Followup): {e}")
-            await interaction.channel.send(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。")
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except Exception:
+                    pass
+            if not interaction.response.is_done():
+                 await interaction.response.send_message(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。", ephemeral=True)
+            else:
+                 await interaction.followup.send(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。", ephemeral=True)
 
 
 @bot.event
@@ -225,6 +247,12 @@ async def on_message(message: discord.Message):
 
         print(f"Received mention from {message.author.name} in channel {channel_id} (Server: {server_id})")
         print(f"User input: {user_input_text}")
+
+        progress_message: Optional[discord.Message] = None
+        try:
+            progress_message = await message.channel.send(f"{message.author.mention} `{user_input_text[:50]}{'...' if len(user_input_text) > 50 else ''}` について考え中です...")
+        except discord.HTTPException as e:
+            print(f"進捗メッセージの送信に失敗 (on_message): {e}")
 
         attachments_data = []
         if message.attachments:
@@ -271,6 +299,8 @@ async def on_message(message: discord.Message):
             "user_id": user_id,
             "thread_id": thread_id,
             "attachments": attachments_data,
+            "progress_message_id": progress_message.id if progress_message else None,
+            "progress_channel_id": progress_message.channel.id if progress_message else None,
         }
         
         current_state = AgentState(**initial_state_dict)
@@ -280,6 +310,16 @@ async def on_message(message: discord.Message):
             final_state_dict = await app.ainvoke(current_state.model_dump())
             final_state = AgentState(**final_state_dict)
             print("LangGraph app finished.")
+
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except discord.NotFound:
+                    print("進捗メッセージが見つからず削除できませんでした (on_message)。")
+                except discord.Forbidden:
+                    print("進捗メッセージの削除権限がありません (on_message)。")
+                except Exception as e:
+                    print(f"進捗メッセージの削除中にエラー (on_message): {e}")
 
             ai_response_content = final_state.llm_direct_response
             if not ai_response_content:
@@ -313,6 +353,11 @@ async def on_message(message: discord.Message):
 
         except Exception as e:
             print(f"LangGraphの実行中にエラーが発生しました: {e}")
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except Exception:
+                    pass
             await message.channel.send(f"{message.author.mention} 申し訳ありません、処理中にエラーが発生しました。")
 
     await bot.process_commands(message)

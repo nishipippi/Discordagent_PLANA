@@ -1,13 +1,19 @@
-import logging # logging をインポート
-import json # json をインポート
 from typing import Callable, List, Dict, Any, Optional, Union
 import discord
 from discord.ext import commands
+import logging
+import json
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from state import AgentState, ToolCall, LLMDecisionOutput
 from llm_config import llm_chain, llm
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate # PromptTemplate をインポート
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_core.tools import BaseTool
+
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from state import AgentState, ToolCall, LLMDecisionOutput
+from llm_config import llm_chain, llm
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain_core.tools import BaseTool
 
 logger = logging.getLogger(__name__)
@@ -21,10 +27,37 @@ def set_bot_instance_for_nodes(bot_instance: commands.Bot, tool_map: Dict[str, B
     _bot_instance = bot_instance
     _tool_map = tool_map
 
+# 進捗メッセージ更新ヘルパー関数
+async def _update_progress_message(state: AgentState, new_content: str):
+    if not _bot_instance:
+        logger.warning("Progress update skipped: Bot instance not set.")
+        return
+    if state.progress_message_id and state.progress_channel_id:
+        channel = _bot_instance.get_channel(state.progress_channel_id)
+        if channel and isinstance(channel, (discord.TextChannel, discord.Thread, discord.DMChannel, discord.GroupChannel)):
+            try:
+                progress_message = await channel.fetch_message(state.progress_message_id)
+                await progress_message.edit(content=new_content)
+                logger.info(f"Progress message updated: {new_content}")
+            except discord.NotFound:
+                logger.warning(f"Progress message (ID: {state.progress_message_id}) not found for update. Clearing from state.")
+                # メッセージが見つからない場合、stateからIDをクリア
+                state.progress_message_id = None 
+                state.progress_channel_id = None
+            except discord.Forbidden:
+                logger.warning(f"Forbidden to edit progress message (ID: {state.progress_message_id}).")
+            except Exception as e:
+                logger.error(f"Error updating progress message (ID: {state.progress_message_id}): {e}", exc_info=True)
+        else:
+            logger.warning(f"Progress update skipped: Channel (ID: {state.progress_channel_id}) not found or not a messageable channel.")
+    else:
+        logger.info("Progress update skipped: No progress message ID or channel ID in state.")
+
 from tools.discord_tools import get_discord_messages
 from tools.db_utils import load_chat_history
 
 async def process_attachments_node(state: AgentState) -> AgentState:
+    await _update_progress_message(state, f"<@{state.user_id}> さんのために添付ファイルを処理中です...")
     print("--- process_attachments_node ---")
     attachments = state.attachments
     input_text = state.input_text
@@ -77,6 +110,7 @@ async def process_attachments_node(state: AgentState) -> AgentState:
     return AgentState(**current_state_dict)
 
 async def fetch_chat_history(state: AgentState) -> AgentState:
+    await _update_progress_message(state, f"<@{state.user_id}> さんのために過去の会話を読み込んでいます...")
     print("--- fetch_chat_history ---")
     if not _bot_instance:
         logger.error("Bot instance not set for nodes.")
@@ -108,6 +142,7 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
     return AgentState(**current_state_dict)
 
 async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
+    await _update_progress_message(state, f"<@{state.user_id}> さんのために次に何をすべきか考えています...")
     print("--- decide_tool_or_direct_response_node ---")
     input_text = state.input_text
     chat_history = state.chat_history
@@ -179,6 +214,8 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
     response_obj: Any = await chain.ainvoke({})
     logger.info(f"LLM structured response object: {response_obj.dict()}")
 
+    current_state_dict = state.model_dump() # 先にダンプしておく
+
     try:
         thought = response_obj.thought
         tool_call_data = response_obj.tool_call
@@ -188,47 +225,16 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
 
         if tool_call_data:
             tool_name = tool_call_data.name
-            tool_args_raw = tool_call_data.args
+            tool_args = tool_call_data.args # この時点で tool_args は辞書のはず
 
-            tool_args: Optional[Dict[str, Any]]
-            if isinstance(tool_args_raw, str):
-                try:
-                    tool_args = json.loads(tool_args_raw)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse tool_args string to dict: {tool_args_raw}, Error: {e}")
-                    current_state_dict = state.dict()
-                    current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(ツール引数パースエラー)"
-                    current_state_dict["tool_name"] = None
-                    current_state_dict["tool_args"] = None
-                    return AgentState(**current_state_dict)
-            elif isinstance(tool_args_raw, dict):
-                tool_args = tool_args_raw
-            else:
-                logger.error(f"Unexpected type for tool_args: {type(tool_args_raw)}, value: {tool_args_raw}")
-                current_state_dict = state.dict()
-                current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(ツール引数型エラー)"
-                current_state_dict["tool_name"] = None
-                current_state_dict["tool_args"] = None
-                return AgentState(**current_state_dict)
-
-            if tool_name and tool_args is not None:
-                print(f"LLM decided to call tool: {tool_name} with args: {tool_args}")
-                current_state_dict = state.dict()
-                current_state_dict["tool_name"] = tool_name
-                current_state_dict["tool_args"] = tool_args
-                current_state_dict["llm_direct_response"] = None
-                return AgentState(**current_state_dict)
-            else:
-                logger.warning(f"Parsed tool_call, but name or args are missing: {tool_call_data}")
-                current_state_dict = state.dict()
-                current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(ツール呼び出し情報不足)"
-                current_state_dict["tool_name"] = None
-                current_state_dict["tool_args"] = None
-                return AgentState(**current_state_dict)
+            print(f"LLM decided to call tool: {tool_name} with args: {tool_args}")
+            current_state_dict["tool_name"] = tool_name
+            current_state_dict["tool_args"] = tool_args
+            current_state_dict["llm_direct_response"] = None
+            return AgentState(**current_state_dict)
 
         elif direct_response_content:
             print(f"LLM decided to respond directly: {direct_response_content}")
-            current_state_dict = state.dict()
             current_state_dict["llm_direct_response"] = direct_response_content
             current_state_dict["tool_name"] = None
             current_state_dict["tool_args"] = None
@@ -236,21 +242,25 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
         
         else:
             logger.error(f"LLMDecisionOutput did not contain tool_call or direct_response: {response_obj.dict()}")
-            current_state_dict = state.dict()
             current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(判断結果なし)"
             current_state_dict["tool_name"] = None
             current_state_dict["tool_args"] = None
             return AgentState(**current_state_dict)
 
-    except Exception as e:
+    except Exception as e: # ここで Pydantic の ValidationError も捕捉される
         logger.error(f"Error processing LLM structured response in decide_node: {e}", exc_info=True)
-        current_state_dict = state.dict()
-        current_state_dict["llm_direct_response"] = "AIの応答処理中にエラーが発生しました。"
+        current_state_dict = state.model_dump() # state を再ダンプ
+        current_state_dict["llm_direct_response"] = (
+            "AIの応答を解析中に問題が発生しました。ツールを正しく使用できない可能性があります。"
+            "別の方法で回答を試みます。"
+        )
         current_state_dict["tool_name"] = None
         current_state_dict["tool_args"] = None
         return AgentState(**current_state_dict)
 
 async def execute_tool_node(state: AgentState) -> AgentState:
+    tool_name = state.tool_name if state.tool_name else "不明なツール"
+    await _update_progress_message(state, f"<@{state.user_id}> さんのためにツール「{tool_name}」を実行中です...")
     print("--- execute_tool_node ---")
     tool_name = state.tool_name
     tool_args = state.tool_args
@@ -328,6 +338,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
     return AgentState(**current_state_dict)
 
 async def generate_final_response_node(state: AgentState) -> AgentState:
+    await _update_progress_message(state, f"<@{state.user_id}> さんのために応答を生成中です...")
     print("--- generate_final_response_node ---")
     input_text = state.input_text
     current_chat_history_at_entry = list(state.chat_history)
@@ -525,6 +536,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
     )
 
 async def generate_followup_questions_node(state: AgentState) -> AgentState:
+    await _update_progress_message(state, f"<@{state.user_id}> さんのために追加の質問を考えています...")
     print("--- generate_followup_questions_node ---")
     ai_final_response = state.llm_direct_response
     chat_history = state.chat_history
