@@ -29,8 +29,8 @@
     *   langchain-google-genai
     *   google-genai (Gemini利用時)
     *   requests (Brave Search API直接コール時)
-    *   ベクトルストアライブラリ (Chroma, FAISSなど)
-    *   データベース操作ライブラリ (sqlite3など)
+    *   ベクトルストアライブラリ (FAISS)
+    *   データベース操作ライブラリ (SQLite3)
     *   langchain-discord-shikenso
 *   **AIモデル**:
     *   Google Gemini
@@ -38,7 +38,7 @@
     *   Brave Search API
 *   **データベース**:
     *   SQLite
-    *   ベクトルストア (Chroma, FAISSなど)
+    *   ベクトルストア (FAISS)
 
 ## 4. セットアップと実行方法
 
