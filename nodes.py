@@ -1,20 +1,19 @@
 import logging # logging をインポート
 import json # json をインポート
-from typing import Callable, List, Dict, Any, Optional, Union # Any, Optional, Union をインポート
-import discord # discord.py の型ヒントのため
-from discord.ext import commands # commands.Bot の型ヒントのため
+from typing import Callable, List, Dict, Any, Optional, Union
+import discord
+from discord.ext import commands
 
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage # BaseMessage をインポート
-from state import AgentState, ToolCall, LLMDecisionOutput # 新しく定義したPydanticモデルをインポート
-from llm_config import llm_chain, llm # llm_modelをllmに変更
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.tools import BaseTool # BaseTool クラスをインポート
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
+from state import AgentState, ToolCall, LLMDecisionOutput
+from llm_config import llm_chain, llm
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate # PromptTemplate をインポート
+from langchain_core.tools import BaseTool
 
-logger = logging.getLogger(__name__) # logger を定義
+logger = logging.getLogger(__name__)
 
-# bot インスタンスとツールマップをノード内で利用するためのグローバル変数
 _bot_instance: Optional[commands.Bot] = None
-_tool_map: Optional[Dict[str, BaseTool]] = None # tool_map を追加
+_tool_map: Optional[Dict[str, BaseTool]] = None
 
 def set_bot_instance_for_nodes(bot_instance: commands.Bot, tool_map: Dict[str, BaseTool]):
     global _bot_instance
@@ -22,22 +21,19 @@ def set_bot_instance_for_nodes(bot_instance: commands.Bot, tool_map: Dict[str, B
     _bot_instance = bot_instance
     _tool_map = tool_map
 
-from tools.discord_tools import get_discord_messages # get_discord_messages をインポート
-from tools.db_utils import load_chat_history # load_chat_history をインポート
+from tools.discord_tools import get_discord_messages
+from tools.db_utils import load_chat_history
 
-# 新しいノード: 添付ファイルを処理し、LLMへの入力メッセージを構築
 async def process_attachments_node(state: AgentState) -> AgentState:
     print("--- process_attachments_node ---")
     attachments = state.attachments
     input_text = state.input_text
-    chat_history = list(state.chat_history) # 履歴のコピーを作成
+    chat_history = list(state.chat_history)
 
     if not attachments:
         print("No attachments found. Skipping attachment processing.")
-        return state # 添付ファイルがなければ何もしない
+        return state
 
-    # LLMに渡すためのコンテンツリストを構築
-    # 既存の input_text があればそれも含む
     content_parts: List[Union[str, Dict[str, Any]]] = []
     if input_text:
         content_parts.append({"type": "text", "text": input_text})
@@ -49,99 +45,68 @@ async def process_attachments_node(state: AgentState) -> AgentState:
         encoded_content = attachment.get("content")
 
         if file_type == "image" and encoded_content:
-            # 画像の場合、Base64エンコードされたデータをimage_url形式で追加
             image_url = f"data:{content_type};base64,{encoded_content}"
             content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
             print(f"Added image attachment to content: {filename}")
         elif file_type == "pdf" and encoded_content:
-            # PDFの場合、Base64エンコードされたデータを media タイプとして追加
             content_parts.append({
                 "type": "media",
-                "mime_type": "application/pdf", # MIMEタイプを明示
-                "data": encoded_content,        # Base64エンコードされたPDFデータ
+                "mime_type": "application/pdf",
+                "data": encoded_content,
             })
             print(f"Added PDF attachment (Base64) to content_parts for LLM: {filename}")
         else:
             print(f"Skipping unsupported attachment type in node: {filename} ({content_type})")
 
-    # 既存のチャット履歴の最後のHumanMessage (元のinput_textのみを含むもの) を置き換えるか、
-    # 新しいマルチモーダルなHumanMessageを履歴の最後に追加する。
-    # bot.py の on_message で input_text を含む HumanMessage が既に追加されているため、
-    # それを pop して、新しい content_parts を持つ HumanMessage を追加する。
-
-    # 最後のメッセージが元の input_text を含む HumanMessage であることを確認
-    # (より堅牢にするには、メッセージIDなどで特定する方が良いが、ここでは簡略化)
     if chat_history and isinstance(chat_history[-1], HumanMessage) and chat_history[-1].content == input_text:
-         # content が単純な文字列の場合のみ pop する。既にリスト形式の場合は pop しない。
         if isinstance(chat_history[-1].content, str):
             print(f"Popping last HumanMessage with simple text content: {input_text}")
             chat_history.pop()
 
-    # 新しいマルチモーダルHumanMessageを作成して履歴に追加
-    if content_parts: # content_parts が空でない場合のみ追加
+    if content_parts:
         multimodal_human_message = HumanMessage(content=content_parts)
         updated_chat_history = chat_history + [multimodal_human_message]
         print("Created and added new multimodal HumanMessage to chat_history.")
     else:
-        # content_parts が空の場合 (例: テキスト入力も添付ファイルもなかった場合)
-        # 基本的には on_message で input_text があれば履歴に追加されているはず
         updated_chat_history = chat_history
         print("No content_parts to create a new HumanMessage. Using existing chat_history.")
 
-
-    # AgentState を更新して返す
     current_state_dict = state.model_dump()
     current_state_dict["chat_history"] = updated_chat_history
-    # input_text はLLMへのメッセージに含められたので、AgentStateのトップレベルからはクリアしても良いが、
-    # decide_tool_or_direct_response_node で利用しているため、残しておく。
-    # current_state_dict["input_text"] = "" # クリアしない
-    current_state_dict["attachments"] = [] # 処理済みなのでクリア
+    current_state_dict["attachments"] = []
     return AgentState(**current_state_dict)
 
-# 新しいノード: メッセージ履歴の取得
 async def fetch_chat_history(state: AgentState) -> AgentState:
     print("--- fetch_chat_history ---")
     if not _bot_instance:
         logger.error("Bot instance not set for nodes.")
-        # エラーハンドリング: state にエラー情報を格納して返すなど
-        # AgentState は BaseModel なので、辞書に変換して更新
-        current_state_dict = state.dict() # BaseModel の .dict() メソッドを使用
-        current_state_dict["chat_history"] = state.chat_history + [AIMessage(content="履歴取得エラー: Botインスタンス未設定")] # state.get() を state.chat_history に変更
+        current_state_dict = state.dict()
+        current_state_dict["chat_history"] = state.chat_history + [AIMessage(content="履歴取得エラー: Botインスタンス未設定")]
         return AgentState(**current_state_dict)
 
-    channel_id = state.channel_id # AgentState は BaseModel なので .get() ではなく直接アクセス
-    # thread_id = state.thread_id # 必要に応じてスレッド対応
-
-    # 直近のメッセージを取得 (例: 過去10件)
+    channel_id = state.channel_id
     new_messages = await get_discord_messages(_bot_instance, channel_id, limit=10)
     
-    # ここで新しいメッセージにプレフィックスを付与
     prefixed_new_messages: List[BaseMessage] = []
     for msg in new_messages:
         if isinstance(msg, HumanMessage):
-            # content がリストの場合も考慮して文字列に変換
             content_str = str(msg.content) if isinstance(msg.content, list) else msg.content
             prefixed_new_messages.append(HumanMessage(content=f"[過去の会話] Human: {content_str}"))
         elif isinstance(msg, AIMessage):
             prefixed_new_messages.append(AIMessage(content=f"[過去の会話] AI: {msg.content}"))
         else:
-            # その他のメッセージタイプはそのまま追加（またはスキップ）
             prefixed_new_messages.append(msg)
 
-    # 既存のチャット履歴にプレフィックス付きの新しいメッセージを追加
     updated_chat_history = state.chat_history + prefixed_new_messages
     
-    # 履歴の長さを制限 (例: 最新の1件を保持)
     max_history_length = 1
     if len(updated_chat_history) > max_history_length:
         updated_chat_history = updated_chat_history[-max_history_length:]
 
-    # AgentState の他のフィールドも維持する
-    current_state_dict = state.dict() # BaseModel の .dict() メソッドを使用
+    current_state_dict = state.dict()
     current_state_dict["chat_history"] = updated_chat_history
     return AgentState(**current_state_dict)
 
-# decide_tool_or_direct_response_node (LLMによる判断ノード)
 async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
     print("--- decide_tool_or_direct_response_node ---")
     input_text = state.input_text
@@ -150,14 +115,12 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
     channel_id = state.channel_id
     user_id = state.user_id
 
-    # デバッグログ: chat_history の内容と型を確認
     logger.info(f"decide_tool_or_direct_response_node: chat_history received (length: {len(chat_history)})")
     for i, msg in enumerate(chat_history):
-        logger.info(f"  [{i}] Type: {type(msg)}, Content: {msg.content[:50]}...") # content の一部を表示
-        if not isinstance(msg, (HumanMessage, AIMessage, SystemMessage, BaseMessage)): # BaseMessage も含めてチェック
+        logger.info(f"  [{i}] Type: {type(msg)}, Content: {msg.content[:50]}...")
+        if not isinstance(msg, (HumanMessage, AIMessage, SystemMessage, BaseMessage)):
             logger.warning(f"  [{i}] Unexpected message type in chat_history: {type(msg)}")
 
-    # prompts/system_instruction.txt の内容を読み込む
     try:
         with open("prompts/system_instruction.txt", "r", encoding="utf-8") as f:
             system_instruction_content = f.read()
@@ -172,21 +135,16 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
             llm_direct_response="エラー: システム指示プロンプトファイルが見つかりません。"
         )
 
-    # プロンプトのプレースホルダを実際の値で置き換える
-    # LLMに渡すプロンプトを構築
     formatted_system_instruction = system_instruction_content.format(
         server_id=server_id,
         channel_id=channel_id,
         user_id=user_id,
-        input_text=input_text # input_text もプロンプトに渡す
+        input_text=input_text
     )
 
     messages_for_prompt: List[BaseMessage] = [SystemMessage(content=formatted_system_instruction)]
-    # chat_history の各メッセージを処理し、LLMに渡す形式に変換
     for msg in chat_history:
         if isinstance(msg, HumanMessage):
-            # HumanMessage の content がリストの場合（マルチモーダルコンテンツ）はそのまま渡す
-            # これにより、LLMは画像データを直接参照できるようになる
             if isinstance(msg.content, list):
                 messages_for_prompt.append(HumanMessage(content=msg.content))
             elif isinstance(msg.content, str):
@@ -209,36 +167,18 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
                 logger.warning(f"SystemMessage with unexpected content type: {type(msg.content)}. Content: {str(msg.content)[:100]}...")
                 messages_for_prompt.append(SystemMessage(content="[形式不明のシステムメッセージ]"))
         
-        # ToolMessage の扱いは現状のコードにはないが、もし追加するなら content を確認・簡略化
-        # elif isinstance(msg, ToolMessage):
-        #     # ToolMessage の content が長大な場合は簡略化を検討
-        #     if isinstance(msg.content, str) and len(msg.content) > 500: # 例: 500文字を超える場合は簡略化
-        #         messages_for_prompt.append(ToolMessage(content=f"[ツール実行結果あり: {msg.tool_call_id}]", tool_call_id=msg.tool_call_id))
-        #     else:
-        #         messages_for_prompt.append(msg)
-
         else:
             logger.warning(f"Skipping unexpected message type in chat_history for LLM prompt: {type(msg)}")
-            continue # スキップする
+            continue
 
-    # 現在のユーザー入力 (input_text) は、process_attachments_node で
-    # 既に chat_history の最後の HumanMessage にマージされているか、
-    # あるいは chat_history に input_text のみの HumanMessage が追加されているはず。
-    # そのため、ここで再度 messages_for_prompt.append(HumanMessage(content=input_text)) を行うと、
-    # 最新のユーザー入力が二重に追加される可能性がある。
-    # messages_for_prompt.append(HumanMessage(content=input_text)) # ★削除またはコメントアウト★
     prompt_template = ChatPromptTemplate.from_messages(messages_for_prompt)
 
-    # LLMにツールをバインドする代わりに、structured_output を使用
-    # LLMDecisionOutput がツール呼び出しの構造を定義していることを前提とする。
-    # LLMはプロンプトとスキーマに基づいてツール呼び出しのJSONを生成する。
     structured_llm = llm.with_structured_output(LLMDecisionOutput)
     chain = prompt_template | structured_llm
 
-    response_obj: Any = await chain.ainvoke({}) # LLMDecisionOutput のインスタンスとして応答を取得
-    logger.info(f"LLM structured response object: {response_obj.dict()}") # 構造化された応答をログに出力
+    response_obj: Any = await chain.ainvoke({})
+    logger.info(f"LLM structured response object: {response_obj.dict()}")
 
-    # LLMの応答オブジェクトをパース
     try:
         thought = response_obj.thought
         tool_call_data = response_obj.tool_call
@@ -246,27 +186,24 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
 
         print(f"LLM thought: {thought}")
 
-        if tool_call_data: # tool_call があればツール実行へ
+        if tool_call_data:
             tool_name = tool_call_data.name
-            tool_args_raw = tool_call_data.args # 生の引数を取得
+            tool_args_raw = tool_call_data.args
 
-            # tool_args_raw が文字列の場合、JSONとしてパースして辞書に変換
             tool_args: Optional[Dict[str, Any]]
             if isinstance(tool_args_raw, str):
                 try:
                     tool_args = json.loads(tool_args_raw)
                 except json.JSONDecodeError as e:
                     logger.error(f"Failed to parse tool_args string to dict: {tool_args_raw}, Error: {e}")
-                    # エラー処理: 例えば、直接応答に切り替えるか、エラーメッセージを返す
                     current_state_dict = state.dict()
                     current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(ツール引数パースエラー)"
                     current_state_dict["tool_name"] = None
                     current_state_dict["tool_args"] = None
                     return AgentState(**current_state_dict)
             elif isinstance(tool_args_raw, dict):
-                tool_args = tool_args_raw # 既に辞書型ならそのまま使用
+                tool_args = tool_args_raw
             else:
-                # 文字列でも辞書でもない予期せぬ型の場合
                 logger.error(f"Unexpected type for tool_args: {type(tool_args_raw)}, value: {tool_args_raw}")
                 current_state_dict = state.dict()
                 current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(ツール引数型エラー)"
@@ -274,11 +211,11 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
                 current_state_dict["tool_args"] = None
                 return AgentState(**current_state_dict)
 
-            if tool_name and tool_args is not None: # パース後の tool_args を使用
+            if tool_name and tool_args is not None:
                 print(f"LLM decided to call tool: {tool_name} with args: {tool_args}")
                 current_state_dict = state.dict()
                 current_state_dict["tool_name"] = tool_name
-                current_state_dict["tool_args"] = tool_args # パース後の tool_args をセット
+                current_state_dict["tool_args"] = tool_args
                 current_state_dict["llm_direct_response"] = None
                 return AgentState(**current_state_dict)
             else:
@@ -289,7 +226,7 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
                 current_state_dict["tool_args"] = None
                 return AgentState(**current_state_dict)
 
-        elif direct_response_content: # direct_response があれば直接応答へ
+        elif direct_response_content:
             print(f"LLM decided to respond directly: {direct_response_content}")
             current_state_dict = state.dict()
             current_state_dict["llm_direct_response"] = direct_response_content
@@ -297,7 +234,7 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
             current_state_dict["tool_args"] = None
             return AgentState(**current_state_dict)
         
-        else: # tool_call も direct_response もない場合 (スキーマでどちらか必須にしているので、基本的には通らないはず)
+        else:
             logger.error(f"LLMDecisionOutput did not contain tool_call or direct_response: {response_obj.dict()}")
             current_state_dict = state.dict()
             current_state_dict["llm_direct_response"] = "AIの応答形式が予期せぬものでした。(判断結果なし)"
@@ -313,7 +250,6 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
         current_state_dict["tool_args"] = None
         return AgentState(**current_state_dict)
 
-# execute_tool_node (汎用ツール実行ノード)
 async def execute_tool_node(state: AgentState) -> AgentState:
     print("--- execute_tool_node ---")
     tool_name = state.tool_name
@@ -366,45 +302,35 @@ async def execute_tool_node(state: AgentState) -> AgentState:
 
     print(f"Executing tool: {tool_name} with args: {tool_args}")
     try:
-        # tool_args が None でないことを確認
         if tool_args is None:
             raise ValueError("Tool arguments are None.")
-        # ツールを実行 (非同期ツールを想定)
-        # tool.ainvoke は辞書を引数として受け取り、args_schema に基づいて処理する
-        tool_output_result = await tool.ainvoke(tool_args) # 変数名を変更
-        print(f"Tool '{tool_name}' executed. Output: {str(tool_output_result)[:100]}...") # 出力の一部を表示
+        tool_output_result = await tool.ainvoke(tool_args)
+        print(f"Tool '{tool_name}' executed. Output: {str(tool_output_result)[:100]}...")
     except Exception as e:
         logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
-        tool_output_result = f"エラー: ツール '{tool_name}' の実行中に問題が発生しました: {e}" # 変数名を変更
+        tool_output_result = f"エラー: ツール '{tool_name}' の実行中に問題が発生しました: {e}"
 
-    # AgentStateの更新
-    current_state_dict = state.model_dump() # model_dump() を使用
+    current_state_dict = state.model_dump()
 
-    # web_searchツールの結果を特別扱い
     if tool_name == "web_search" and isinstance(tool_output_result, list):
         current_state_dict["search_results"] = tool_output_result
-        # tool_output には、検索結果の要約や「検索を実行しました」などの文字列を入れることを検討
-        # ここでは一旦、最初の検索結果のタイトルとURLを文字列として格納する例
         if tool_output_result:
             first_result = tool_output_result[0]
             current_state_dict["tool_output"] = f"検索結果: {first_result.get('title', '')} - {first_result.get('url', '')}"
         else:
             current_state_dict["tool_output"] = "検索結果はありませんでした。"
     else:
-        # 他のツール、またはweb_searchが文字列を返した場合
-        current_state_dict["tool_output"] = str(tool_output_result) # 文字列に変換して格納
+        current_state_dict["tool_output"] = str(tool_output_result)
 
-    current_state_dict["tool_name"] = None # ツール実行後はツール情報をクリア
-    current_state_dict["tool_args"] = None # ツール実行後はツール情報をクリア
+    current_state_dict["tool_name"] = None
+    current_state_dict["tool_args"] = None
     
     return AgentState(**current_state_dict)
 
-# generate_final_response_node (ツール結果を用いた応答生成ノード)
 async def generate_final_response_node(state: AgentState) -> AgentState:
     print("--- generate_final_response_node ---")
     input_text = state.input_text
-    # ★★★ chat_history をここで取得 ★★★
-    current_chat_history_at_entry = list(state.chat_history) # コピーを作成して変更の影響を受けないようにする
+    current_chat_history_at_entry = list(state.chat_history)
     tool_name = state.tool_name
     tool_output = state.tool_output
     llm_direct_response = state.llm_direct_response
@@ -417,7 +343,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
             logger.error(f"  ERROR @ ENTRY: Item {i} is NOT a BaseMessage subclass! Value: {item}")
 
     final_response_content = ""
-    image_output_base64: Optional[str] = None # image_output_base64 をここで初期化
+    image_output_base64: Optional[str] = None
 
     if llm_direct_response:
         final_response_content = llm_direct_response
@@ -426,7 +352,6 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
         image_data_prefix = "image_base64_data::"
 
         if tool_output.startswith("エラー:"):
-            # 1. エラー出力の場合 (最優先で処理)
             print(f"Tool execution resulted in an error. Generating response with LLM based on: {tool_output}")
             
             system_message_content = (
@@ -446,7 +371,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
                     continue
 
                 if isinstance(msg_to_convert, HumanMessage):
-                    if isinstance(msg_to_convert.content, list): # マルチモーダルコンテンツの可能性
+                    if isinstance(msg_to_convert.content, list):
                         text_parts = [part["text"] for part in msg_to_convert.content if isinstance(part, dict) and part.get("type") == "text"]
                         processed_content = "\n".join(text_parts)
                         has_non_text_attachment = any(
@@ -485,7 +410,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
             
             response_content_str: str = await llm_chain.ainvoke({
                 "user_input": input_text,
-                "chat_history": converted_chat_history, # 簡略化された履歴を使用
+                "chat_history": converted_chat_history,
                 "system_instruction": system_message_content
             })
             final_response_content = response_content_str
@@ -493,31 +418,25 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
 
 
         elif tool_output.startswith("タイマーを") and "に設定しました。時間になったらお知らせします。" in tool_output:
-            # タイマー設定確認メッセージの場合
             print("Timer setup confirmation received. Setting response content.")
-            final_response_content = tool_output # ツールからの確認メッセージをそのまま応答とする
+            final_response_content = tool_output
             image_output_base64 = None
         elif tool_output.startswith("タイマーを") and "に設定しました。時間になったらお知らせします。" in tool_output:
-            # タイマー設定確認メッセージの場合
             print("Timer setup confirmation received. Setting response content.")
-            final_response_content = tool_output # ツールからの確認メッセージをそのまま応答とする
+            final_response_content = tool_output
             image_output_base64 = None
         elif "Timer for" in tool_output and "has finished!" in tool_output:
-            # タイマー完了通知の場合 (これは bot.py で処理されるので、ここでは空にする)
             print("Timer completion notification received. Setting empty response for bot.py to handle.")
             final_response_content = ""
             image_output_base64 = None
 
 
         elif tool_output.startswith(image_data_prefix):
-            # 3. 画像生成成功の場合 (プレフィックスで判定)
             print("Image generation tool output received. Setting fixed response and image data.")
             final_response_content = "画像を生成しました！"
-            image_output_base64 = tool_output.split(image_data_prefix, 1)[1] # プレフィックスを除去
+            image_output_base64 = tool_output.split(image_data_prefix, 1)[1]
         
         else:
-            # 4. 上記以外（エラーでなく、タイマーでもなく、画像でもない）のツール出力の場合
-            # (例: remember_information, recall_information, web_search の正常な出力)
             print(f"Tool execution resulted in non-error, non-timer, non-image output. Generating response with LLM based on: {tool_output}")
             
             system_message_content = (
@@ -537,7 +456,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
                     continue
 
                 if isinstance(msg_to_convert, HumanMessage):
-                    if isinstance(msg_to_convert.content, list): # マルチモーダルコンテンツの可能性
+                    if isinstance(msg_to_convert.content, list):
                         text_parts = [part["text"] for part in msg_to_convert.content if isinstance(part, dict) and part.get("type") == "text"]
                         processed_content = "\n".join(text_parts)
                         has_non_text_attachment = any(
@@ -576,7 +495,7 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
             
             response_content_str: str = await llm_chain.ainvoke({
                 "user_input": input_text,
-                "chat_history": converted_chat_history, # 簡略化された履歴を使用
+                "chat_history": converted_chat_history,
                 "system_instruction": system_message_content
             })
             final_response_content = response_content_str
@@ -590,17 +509,93 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
 
     return AgentState(
         input_text=input_text,
-        chat_history=updated_chat_history, # AIの最終応答を含む更新された履歴
+        chat_history=updated_chat_history,
         server_id=state.server_id,
         channel_id=state.channel_id,
         user_id=state.user_id,
         thread_id=state.thread_id,
-        llm_direct_response=final_response_content, # 最終的なテキスト応答
-        tool_name=None, # ツール情報はクリア
-        tool_args=None, # ツール情報はクリア
-        tool_output=None, # ツール出力は処理済みなのでクリア
-        image_output_base64=image_output_base64, # 画像生成成功時はBase64データ、それ以外はNone
+        llm_direct_response=final_response_content,
+        tool_name=None,
+        tool_args=None,
+        tool_output=None,
+        image_output_base64=image_output_base64,
         search_query=None,
         search_results=None,
         should_search_decision=None
     )
+
+async def generate_followup_questions_node(state: AgentState) -> AgentState:
+    print("--- generate_followup_questions_node ---")
+    ai_final_response = state.llm_direct_response
+    chat_history = state.chat_history
+
+    if not ai_final_response:
+        print("No AI final response to generate followup questions from.")
+        current_state_dict = state.model_dump()
+        current_state_dict["followup_questions"] = None
+        return AgentState(**current_state_dict)
+
+    try:
+        with open("prompts/generate_followup_prompt.txt", "r", encoding="utf-8") as f:
+            prompt_template_str = f.read()
+    except FileNotFoundError:
+        logger.error("prompts/generate_followup_prompt.txt not found.")
+        current_state_dict = state.model_dump()
+        current_state_dict["followup_questions"] = None
+        return AgentState(**current_state_dict)
+
+    history_for_prompt_list = []
+    for msg in chat_history[-5:]:
+        if isinstance(msg, HumanMessage):
+            if isinstance(msg.content, str):
+                history_for_prompt_list.append(f"Human: {msg.content}")
+            elif isinstance(msg.content, list):
+                 text_content = " ".join([part["text"] for part in msg.content if isinstance(part, dict) and part.get("type") == "text"])
+                 history_for_prompt_list.append(f"Human: {text_content} [添付ファイルあり]")
+        elif isinstance(msg, AIMessage):
+            if isinstance(msg.content, str):
+                history_for_prompt_list.append(f"AI: {msg.content}")
+    chat_history_for_followup = "\n".join(history_for_prompt_list)
+
+    prompt = PromptTemplate.from_template(prompt_template_str)
+    
+    chain = prompt | llm 
+    
+    try:
+        response_content = await chain.ainvoke({
+            "chat_history_for_followup": chat_history_for_followup,
+            "ai_final_response": ai_final_response
+        })
+        
+        if isinstance(response_content, AIMessage):
+            generated_json_str = response_content.content
+        elif isinstance(response_content, str):
+            generated_json_str = response_content
+        else:
+            raise ValueError(f"Unexpected response type from LLM: {type(response_content)}")
+
+        print(f"LLM raw response for followup questions: {generated_json_str}")
+        
+        if "```json" in generated_json_str:
+            generated_json_str = generated_json_str.split("```json")[1].split("```")[0].strip()
+        elif "```" in generated_json_str:
+             generated_json_str = generated_json_str.split("```")[1].strip()
+
+
+        followup_questions_list = json.loads(generated_json_str)
+        if isinstance(followup_questions_list, list) and all(isinstance(q, str) for q in followup_questions_list):
+            print(f"Generated followup questions: {followup_questions_list}")
+            current_state_dict = state.model_dump()
+            current_state_dict["followup_questions"] = followup_questions_list[:3]
+            return AgentState(**current_state_dict)
+        else:
+            raise ValueError("LLM did not return a valid list of strings for followup questions.")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON for followup questions: {generated_json_str}, Error: {e}")
+    except Exception as e:
+        logger.error(f"Error generating followup questions: {e}", exc_info=True)
+    
+    current_state_dict = state.model_dump()
+    current_state_dict["followup_questions"] = None
+    return AgentState(**current_state_dict)

@@ -24,6 +24,7 @@ class AgentState(BaseModel):
     attachments: Optional[List[Dict[str, Any]]] = Field(default_factory=list, description="添付ファイルの情報（ファイル名、MIMEタイプ、Base64エンコードされた内容など）")
     # --- For Image Generation Output ---
     image_output_base64: Optional[str] = Field(default=None, description="生成された画像のBase64エンコードデータ")
+    followup_questions: Optional[List[str]] = Field(default=None, description="AIによって生成されたフォローアップ質問のリスト")
 
     @field_validator('chat_history', mode='before')
     @classmethod

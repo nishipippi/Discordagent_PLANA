@@ -4,63 +4,61 @@ from discord.ext import commands
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, END
 from state import AgentState
-from nodes import ( # 新しいノードをインポート
+import os
+import discord
+from discord.ext import commands
+from dotenv import load_dotenv
+from langgraph.graph import StateGraph, END
+from state import AgentState
+from nodes import (
     fetch_chat_history,
-    process_attachments_node, # 追加
+    process_attachments_node,
     decide_tool_or_direct_response_node,
     execute_tool_node,
     generate_final_response_node,
-    set_bot_instance_for_nodes # 追加
+    generate_followup_questions_node, # <<< 追加
+    set_bot_instance_for_nodes
 )
 from langchain_core.messages import HumanMessage, AIMessage
-# tools.discord_tools は nodes.py の fetch_chat_history で使用
-# from tools.discord_tools import get_discord_messages
 from tools.db_utils import init_db, load_chat_history, save_chat_history
-from tools.timer_tools import create_timer_tool # create_timer_tool をインポート
-from typing import Dict, Optional, Literal, Any, List # List を確認
-import logging # logging をインポート
-import base64 # base64 をインポート
-import io # io をインポート
-import aiohttp # aiohttp をインポート (非同期HTTPリクエスト用)
+from tools.timer_tools import create_timer_tool
+from typing import Dict, Optional, Literal, Any, List
+import logging
+import base64
+import io
+import aiohttp
 
 from tools.vector_store_utils import VectorStoreManager
-from tools.brave_search import BraveSearchTool # BraveSearchTool クラスをインポート
-from tools.memory_tools import create_memory_tools # <<< 変更: create_memory_tools をインポート
+from tools.brave_search import BraveSearchTool
+from tools.memory_tools import create_memory_tools
 from tools.image_generation_tools import image_generation_tool
 from langchain_core.tools import BaseTool
+from discord.ui import View, Button # discord.ui をインポート
 
-# .envファイルから環境変数を読み込む
 load_dotenv()
 
-# ロギング設定を追加
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__) # logger を定義
+logger = logging.getLogger(__name__)
 
-# Discord Botトークンを取得
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# インテントを設定
 intents = discord.Intents.default()
-intents.message_content = True  # メッセージ内容の読み取りを許可
+intents.message_content = True
 
-# Botのインスタンスを作成
 class MyBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.vector_store_manager: Optional[VectorStoreManager] = None
-        self.tool_map: Dict[str, BaseTool] = {} # Botインスタンスにツールマップを持たせる
+        self.tool_map: Dict[str, BaseTool] = {}
 
     async def setup_hook(self):
-        # データベースの初期化
         init_db()
         print("データベースの準備完了。")
 
-        # ベクトルストアの初期化
         try:
-            self.vector_store_manager = VectorStoreManager() # ここで初期化
+            self.vector_store_manager = VectorStoreManager()
             print("ベクトルストアの準備完了。")
 
-            # VectorStoreManager が初期化された後にツールを準備
             if self.vector_store_manager:
                 remember_tool_instance, recall_tool_instance = create_memory_tools(self.vector_store_manager)
                 temp_tools = [
@@ -68,13 +66,12 @@ class MyBot(commands.Bot):
                     remember_tool_instance,
                     recall_tool_instance,
                     image_generation_tool,
-                    create_timer_tool(self) # self (botインスタンス) を渡す
+                    create_timer_tool(self)
                 ]
                 self.tool_map = {tool.name: tool for tool in temp_tools}
-                set_bot_instance_for_nodes(self, self.tool_map) # ノードにツールマップを設定
+                set_bot_instance_for_nodes(self, self.tool_map)
                 print("ツールマップが正常に初期化されました。")
             else:
-                # VectorStoreManager がない場合のフォールバック (記憶ツールなし)
                 print("警告: VectorStoreManager が初期化できなかったため、記憶・想起ツールは利用できません。")
                 temp_tools = [
                     BraveSearchTool(),
@@ -84,7 +81,6 @@ class MyBot(commands.Bot):
                 self.tool_map = {tool.name: tool for tool in temp_tools}
                 set_bot_instance_for_nodes(self, self.tool_map)
 
-
         except ValueError as e:
             print(f"ベクトルストアの初期化に失敗しました: {e}")
         except Exception as e:
@@ -92,31 +88,25 @@ class MyBot(commands.Bot):
 
 bot = MyBot(command_prefix='!', intents=intents)
 
-# ALL_TOOLS と tool_map のグローバルな定義は削除し、botインスタンスの属性として管理
-
-# LangGraphグラフの構築
 workflow = StateGraph(AgentState)
 
-# ノードの追加
 workflow.add_node("fetch_chat_history", fetch_chat_history)
-workflow.add_node("process_attachments", process_attachments_node) # 新しいノードを追加
+workflow.add_node("process_attachments", process_attachments_node)
 workflow.add_node("decide_action", decide_tool_or_direct_response_node)
 workflow.add_node("execute_tool", execute_tool_node)
 workflow.add_node("generate_response", generate_final_response_node)
+workflow.add_node("generate_followups", generate_followup_questions_node) # <<< 追加
 
-# エントリーポイントの設定
 workflow.set_entry_point("fetch_chat_history")
 
-# エッジの定義
-workflow.add_edge("fetch_chat_history", "process_attachments") # 履歴取得後に添付ファイル処理へ
-workflow.add_edge("process_attachments", "decide_action") # 添付ファイル処理後に判断ノードへ
+workflow.add_edge("fetch_chat_history", "process_attachments")
+workflow.add_edge("process_attachments", "decide_action")
 
-# decide_action ノードからの条件分岐
 def select_next_node_after_decide_action(state: AgentState) -> Literal["execute_tool", "generate_response"]:
-    if state.tool_name: # tool_name があればツール実行へ
+    if state.tool_name:
         print(f"Conditional edge: Routing to execute_tool for tool: {state.tool_name}")
         return "execute_tool"
-    else: # tool_name がなければ直接応答生成へ
+    else:
         print("Conditional edge: Routing to generate_response (no tool called)")
         return "generate_response"
 
@@ -125,22 +115,96 @@ workflow.add_conditional_edges(
     select_next_node_after_decide_action,
     {
         "execute_tool": "execute_tool",
-        "generate_response": "generate_response", # 直接応答の場合も generate_response へ
+        "generate_response": "generate_response",
     }
 )
 
-# execute_tool ノードの後
-workflow.add_edge("execute_tool", "generate_response") # ツール実行結果を基に応答生成
-
-# generate_response ノードの後
-workflow.add_edge("generate_response", END) # 最終応答で終了
+workflow.add_edge("execute_tool", "generate_response")
+workflow.add_edge("generate_response", "generate_followups") # <<< 変更: 最終応答生成後にフォローアップ生成へ
+workflow.add_edge("generate_followups", END) # <<< 変更: フォローアップ生成後に終了
 
 app = workflow.compile()
+
+class FollowupButton(Button):
+    def __init__(self, label: str, custom_id: str, bot_instance: MyBot):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=custom_id)
+        self.bot_instance = bot_instance
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.disabled or (self.view and self.view.is_finished()):
+            await interaction.response.defer()
+            return
+
+        user_input_text = self.label
+        channel_id = interaction.channel_id
+        server_id = str(interaction.guild_id) if interaction.guild else "DM"
+        user_id = str(interaction.user.id)
+        thread_id = interaction.channel.id if isinstance(interaction.channel, discord.Thread) else None
+
+        await interaction.response.send_message(f"`{user_input_text}` について考え中です...", ephemeral=True)
+
+        loaded_chat_history = load_chat_history(channel_id)
+        print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id} (Followup)")
+
+        initial_state_dict = {
+            "input_text": user_input_text,
+            "chat_history": loaded_chat_history + [HumanMessage(content=user_input_text)],
+            "server_id": server_id,
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "attachments": [],
+        }
+        current_state = AgentState(**initial_state_dict)
+
+        try:
+            print("Invoking LangGraph app for followup...")
+            final_state_dict = await app.ainvoke(current_state.model_dump())
+            final_state = AgentState(**final_state_dict)
+            print("LangGraph app finished for followup.")
+
+            ai_response_content = final_state.llm_direct_response
+            if not ai_response_content:
+                ai_response_content = "申し訳ありません、応答を生成できませんでした。"
+            
+            history_to_save = final_state.chat_history
+            save_chat_history(channel_id, history_to_save)
+
+            followup_view_after_button_click = None
+            if final_state.followup_questions:
+                followup_view_after_button_click = View(timeout=180)
+                for i, q_text in enumerate(final_state.followup_questions):
+                    button_custom_id = f"followup_interaction_{interaction.id}_{i}"
+                    followup_view_after_button_click.add_item(
+                        FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=self.bot_instance)
+                    )
+            
+            response_message = await interaction.channel.send(
+                f'{interaction.user.mention} {ai_response_content}', 
+                view=followup_view_after_button_click
+            )
+
+            if interaction.message:
+                disabled_view = View(timeout=None)
+                for item in interaction.message.components:
+                    if isinstance(item, discord.ActionRow):
+                        for child in item.children:
+                            if isinstance(child, discord.ui.Button):
+                                new_button = Button(label=child.label, style=child.style, custom_id=child.custom_id, disabled=True)
+                                disabled_view.add_item(new_button)
+                try:
+                    await interaction.message.edit(view=disabled_view)
+                except discord.NotFound:
+                    pass
+
+        except Exception as e:
+            print(f"LangGraphの実行中にエラーが発生しました (Followup): {e}")
+            await interaction.channel.send(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。")
+
 
 @bot.event
 async def on_ready():
     print(f'Botとしてログインしました: {bot.user}')
-    # init_db() は setup_hook に移動したため、ここでの呼び出しは不要
 
     if bot.vector_store_manager:
         print("VectorStoreManager は正常に初期化されています。")
@@ -148,40 +212,36 @@ async def on_ready():
         print("警告: VectorStoreManager が初期化されていません。記憶・想起機能が動作しない可能性があります。")
 
 @bot.event
-async def on_message(message: discord.Message): # message の型ヒントを discord.Message に
+async def on_message(message: discord.Message):
     if message.author == bot.user:
         return
 
-    if bot.user and bot.user.mentioned_in(message): # mentioned_in を使用
+    if bot.user and bot.user.mentioned_in(message):
         user_input_text = message.content.replace(f'<@!{bot.user.id}>', '').replace(f'<@{bot.user.id}>', '').strip()
         channel_id = message.channel.id
-        server_id = str(message.guild.id) if message.guild else "DM" # DMの場合も考慮
+        server_id = str(message.guild.id) if message.guild else "DM"
         user_id = str(message.author.id)
         thread_id = message.channel.id if isinstance(message.channel, discord.Thread) else None
 
         print(f"Received mention from {message.author.name} in channel {channel_id} (Server: {server_id})")
         print(f"User input: {user_input_text}")
 
-        # 添付ファイルの処理
         attachments_data = []
         if message.attachments:
             print(f"Found {len(message.attachments)} attachments.")
             for attachment in message.attachments:
                 try:
-                    # ファイルをダウンロード
                     async with aiohttp.ClientSession() as session:
                         async with session.get(attachment.url) as resp:
                             if resp.status == 200:
                                 file_bytes = await resp.read()
-                                # Base64エンコード
                                 encoded_content = base64.b64encode(file_bytes).decode('utf-8')
                                 
-                                # 画像ファイルかPDFファイルを判別
                                 if attachment.content_type and attachment.content_type.startswith('image/'):
                                     attachments_data.append({
                                         "filename": attachment.filename,
                                         "content_type": attachment.content_type,
-                                        "content": encoded_content, # Base64エンコードされた画像データ
+                                        "content": encoded_content,
                                         "type": "image"
                                     })
                                     print(f"Processed image attachment: {attachment.filename}")
@@ -189,7 +249,7 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
                                     attachments_data.append({
                                         "filename": attachment.filename,
                                         "content_type": attachment.content_type,
-                                        "content": encoded_content, # Base64エンコードされたPDFデータ
+                                        "content": encoded_content,
                                         "type": "pdf"
                                     })
                                     print(f"Processed PDF attachment: {attachment.filename}")
@@ -200,30 +260,27 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
                 except Exception as e:
                     print(f"Error processing attachment {attachment.filename}: {e}")
 
-        # 既存の会話状態をデータベースからロード
         loaded_chat_history = load_chat_history(channel_id)
         print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id}")
 
         initial_state_dict = {
             "input_text": user_input_text,
-            "chat_history": loaded_chat_history + [HumanMessage(content=user_input_text)], # 現在の入力も履歴に含める
+            "chat_history": loaded_chat_history + [HumanMessage(content=user_input_text)],
             "server_id": server_id,
             "channel_id": channel_id,
             "user_id": user_id,
             "thread_id": thread_id,
-            "attachments": attachments_data, # 添付ファイルデータを追加
+            "attachments": attachments_data,
         }
         
         current_state = AgentState(**initial_state_dict)
 
         try:
             print("Invoking LangGraph app...")
-            # LangGraphを実行 (チェックポイントなしのシンプルな実行)
-            final_state_dict = await app.ainvoke(current_state.model_dump()) # .dict() を .model_dump() に変更
-            final_state = AgentState(**final_state_dict) # AgentState に再変換
+            final_state_dict = await app.ainvoke(current_state.model_dump())
+            final_state = AgentState(**final_state_dict)
             print("LangGraph app finished.")
 
-            # 最終的な応答を取得 (generate_final_response_node で llm_direct_response に格納される想定)
             ai_response_content = final_state.llm_direct_response
             if not ai_response_content:
                 ai_response_content = "申し訳ありません、応答を生成できませんでした。"
@@ -231,37 +288,35 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
             
             print(f"Final AI response: {ai_response_content}")
 
-            # AIの応答をチャット履歴に追加 (generate_final_response_node で既に追加されているはずなので、ここでは不要かも)
-            # ただし、保存する履歴には含めたい
             history_to_save = final_state.chat_history 
-            # もし generate_final_response_node で履歴に追加されていない場合はここで追加
-            # if not any(isinstance(msg, AIMessage) and msg.content == ai_response_content for msg in history_to_save):
-            # history_to_save.append(AIMessage(content=ai_response_content))
-
             save_chat_history(channel_id, history_to_save)
             print(f"Saved {len(history_to_save)} messages to history for channel {channel_id}")
 
-            # 画像生成結果があれば画像を送信
+            followup_view = None
+            if final_state.followup_questions:
+                followup_view = View(timeout=180)
+                for i, q_text in enumerate(final_state.followup_questions):
+                    button_custom_id = f"followup_{message.id}_{i}"
+                    followup_view.add_item(FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=bot))
+            
             if final_state.image_output_base64:
                 try:
                     image_bytes = base64.b64decode(final_state.image_output_base64)
                     image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
-                    await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file)
+                    await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file, view=followup_view)
                     print("Generated image sent to Discord.")
                 except Exception as img_e:
                     print(f"Error sending image to Discord: {img_e}")
-                    await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)')
-            # タイマー完了メッセージの送信ロジックは tools/timer_tools.py に移動したため削除
+                    await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)', view=followup_view)
             else:
-                await message.channel.send(f'{message.author.mention} {ai_response_content}')
+                await message.channel.send(f'{message.author.mention} {ai_response_content}', view=followup_view)
 
         except Exception as e:
-            print(f"LangGraphの実行中にエラーが発生しました: {e}") # exc_info=True を削除
+            print(f"LangGraphの実行中にエラーが発生しました: {e}")
             await message.channel.send(f"{message.author.mention} 申し訳ありません、処理中にエラーが発生しました。")
 
     await bot.process_commands(message)
 
-# Botを実行
 if __name__ == "__main__":
     if DISCORD_TOKEN:
         bot.run(DISCORD_TOKEN)
