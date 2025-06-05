@@ -69,19 +69,19 @@ class ToolCall(BaseModel):
     name: str = Field(description="呼び出すツールの名前")
     args: Union[Dict[str, Any], str] = Field(description="ツールに渡す引数の辞書またはJSON文字列") # 型を Union に変更
 
-    @field_validator('args', mode='before') # mode='before' でPydanticの型変換前に実行
+    @field_validator('args', mode='before')
     @classmethod
     def parse_args_if_str(cls, value: Any) -> Dict[str, Any]:
         if isinstance(value, str):
+            # シングルクォートをダブルクォートに置換し、True/False/NoneをJSONのtrue/false/nullに変換
+            # これはLLMがPythonの辞書形式で出力した場合のフォールバック
+            processed_value = value.replace("'", '"').replace("True", "true").replace("False", "false").replace("None", "null")
             try:
-                return json.loads(value)
+                return json.loads(processed_value)
             except json.JSONDecodeError as e:
-                # パースに失敗した場合、エラーを発生させるか、
-                # あるいは空の辞書を返すなどのフォールバック処理も検討できる
                 raise ValueError(f"Failed to parse args string to dict: {value}, Error: {e}")
         elif isinstance(value, dict):
-            return value # 既に辞書ならそのまま返す
-        # 予期しない型の場合はエラー
+            return value
         raise TypeError(f"args must be a dict or a valid JSON string, got {type(value)}")
 
 class LLMDecisionOutput(BaseModel):

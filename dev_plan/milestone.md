@@ -123,15 +123,26 @@ M2.2: 画像生成機能の実装 (LangChain Image Generation Tool & LangGraph) 
     *   LLMがツール呼び出し (`tool_call`) も直接応答 (`direct_response`) も返さないというPydanticバリデーションエラーに対し、`prompts/system_instruction.txt` に、判断に迷う場合や指示が曖昧な場合でも、必ず `direct_response` を用いて何らかの応答（例：明確化のための質問）をするようフォールバック指示を追加しました。
 
 **今後の課題 (ログより抽出):**
-*   **Pydantic v1非推奨警告 (`LangChainDeprecationWarning`):**
-    *   内容: `langchain_core.pydantic_v1` の使用に関する警告。LangChainが内部的にPydantic v2を使用するようになったため、互換シムであるv1モジュールは非推奨となっています。
-    *   対応: プロジェクト全体でPydantic v2への移行を計画し、`from langchain_core.pydantic_v1 import BaseModel` のようなインポートを `from pydantic import BaseModel` （またはPydantic v2環境でv1互換のコードを扱う場合は `from pydantic.v1 import BaseModel`）に更新する必要があります。
+*   ~~**Pydantic v1非推奨警告 (`LangChainDeprecationWarning`):**~~ - **対応完了** (`tools/image_generation_tools.py` のインポートを修正)
+    *   ~~内容: `langchain_core.pydantic_v1` の使用に関する警告。LangChainが内部的にPydantic v2を使用するようになったため、互換シムであるv1モジュールは非推奨となっています。~~
+    *   ~~対応: プロジェクト全体でPydantic v2への移行を計画し、`from langchain_core.pydantic_v1 import BaseModel` のようなインポートを `from pydantic import BaseModel` （またはPydantic v2環境でv1互換のコードを扱う場合は `from pydantic.v1 import BaseModel`）に更新する必要があります。~~
 
 
-M2.3: タイマー・アラーム機能の実装 (LangChain Custom Tool, LangGraph & Scheduling)
+M2.3: タイマー・アラーム機能の実装 (LangChain Custom Tool, LangGraph & Scheduling) - **完了**
 
 「〇分後に教えて」「〇時にアラーム」といった指示を認識し、タイマー/アラームを設定するカスタムツールをLangChainのToolとして実装 (Pythonのasyncio.sleepやスケジューリングライブラリAPSchedulerなどを利用)。
 LangGraphのエージェントがこのツールを呼び出し、設定時刻になったら指定されたチャンネルにメンションで通知する機能を実装。
+
+**達成内容:**
+*   `tools/timer_tools.py` に `set_timer` ツールを実装しました。このツールは、指定された分数後にDiscordチャンネルへ通知メッセージを送信します。
+    *   タイマー設定時には「タイマーを設定しました。」という確認メッセージを即座に返します。
+    *   実際の通知は、`asyncio.create_task` を用いてバックグラウンドで実行されます。
+    *   `create_timer_tool` ファクトリ関数を導入し、`bot` インスタンスをツールに渡すようにしました。
+*   `bot.py` を修正し、`create_timer_tool` を使用して `timer_tool` を初期化し、`nodes.py` に `tool_map` を渡すようにしました。また、`on_message` からタイマー完了通知のロジックを削除しました。
+*   `nodes.py` の `generate_final_response_node` を修正し、タイマー設定時の確認メッセージを正しく処理するようにしました。また、ツール管理方法を `bot.py` と統一しました。
+*   `prompts/system_instruction.txt` に `set_timer` ツールの説明を追加しました。
+*   LLMが生成するツール引数のパースエラーに対応するため、`state.py` の `ToolCall` モデルのバリデーションを強化しました。
+*   画像生成ツール以外のツール出力が画像生成成功と誤認される問題を修正するため、`tools/image_generation_tools.py` で出力にプレフィックスを追加し、`nodes.py` の `generate_final_response_node` の判定ロジックを修正しました。
 
 
 フェーズ３：ユーザーエクスペリエンス向上と洗練化 (LangChain & LangGraph)

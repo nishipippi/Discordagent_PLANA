@@ -1,35 +1,29 @@
 import logging # logging をインポート
 import json # json をインポート
 from typing import Callable, List, Dict, Any, Optional, Union # Any, Optional, Union をインポート
+import discord # discord.py の型ヒントのため
+from discord.ext import commands # commands.Bot の型ヒントのため
+
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage # BaseMessage をインポート
 from state import AgentState, ToolCall, LLMDecisionOutput # 新しく定義したPydanticモデルをインポート
 from llm_config import llm_chain, llm # llm_modelをllmに変更
-from tools.brave_search import BraveSearchTool # BraveSearchToolをインポート
-from tools.memory_tools import remember_tool, recall_tool # 新規追加した記憶・想起ツールをインポート
-from tools.image_generation_tools import image_generation_tool # 画像生成ツールをインポート
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import BaseTool # BaseTool クラスをインポート
 
 logger = logging.getLogger(__name__) # logger を定義
 
-# Brave Search Toolのインスタンス化
-brave_search_tool = BraveSearchTool()
+# bot インスタンスとツールマップをノード内で利用するためのグローバル変数
+_bot_instance: Optional[commands.Bot] = None
+_tool_map: Optional[Dict[str, BaseTool]] = None # tool_map を追加
 
-# 利用可能なツールをリストとしてまとめる (nodes.py 内で定義)
-available_tools: List[BaseTool] = [brave_search_tool, remember_tool, recall_tool, image_generation_tool]
-tool_map: Dict[str, BaseTool] = {tool.name: tool for tool in available_tools}
+def set_bot_instance_for_nodes(bot_instance: commands.Bot, tool_map: Dict[str, BaseTool]):
+    global _bot_instance
+    global _tool_map
+    _bot_instance = bot_instance
+    _tool_map = tool_map
 
-import discord # discord.py の型ヒントのため
-from discord.ext import commands # commands.Bot の型ヒントのため
 from tools.discord_tools import get_discord_messages # get_discord_messages をインポート
 from tools.db_utils import load_chat_history # load_chat_history をインポート
-
-# bot インスタンスをノード内で利用するためのグローバル変数 (非推奨だが一時的に使用)
-_bot_instance: Optional[commands.Bot] = None
-
-def set_bot_instance_for_nodes(bot_instance: commands.Bot):
-    global _bot_instance
-    _bot_instance = bot_instance
 
 # 新しいノード: 添付ファイルを処理し、LLMへの入力メッセージを構築
 async def process_attachments_node(state: AgentState) -> AgentState:
@@ -125,8 +119,8 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
     # 重複を避けるため、新しいメッセージが既存の履歴にないか確認するロジックを追加することも検討
     updated_chat_history = state.chat_history + new_messages
     
-    # 履歴の長さを制限 (例: 最新の20件を保持)
-    max_history_length = 20
+    # 履歴の長さを制限 (例: 最新の5件を保持)
+    max_history_length = 5
     if len(updated_chat_history) > max_history_length:
         updated_chat_history = updated_chat_history[-max_history_length:]
 
@@ -331,9 +325,22 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             tool_args=None
         )
 
-    tool = tool_map.get(tool_name)
+    if not _tool_map:
+        logger.error("Tool map not set for nodes.")
+        return AgentState(
+            input_text=input_text,
+            chat_history=chat_history,
+            server_id=server_id,
+            channel_id=channel_id,
+            user_id=user_id,
+            tool_output="エラー: ツールマップが設定されていません。",
+            tool_name=None,
+            tool_args=None
+        )
+
+    tool = _tool_map.get(tool_name)
     if not tool:
-        logger.error(f"Tool '{tool_name}' not found in tool_map.")
+        logger.error(f"Tool '{tool_name}' not found in _tool_map.")
         return AgentState(
             input_text=input_text,
             chat_history=chat_history,
@@ -393,23 +400,16 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
         final_response_content = llm_direct_response
         print(f"Direct LLM response: {final_response_content}")
     elif tool_output:
-        # tool_output が存在し、かつエラーメッセージで始まらない場合、
-        # それは画像生成ツールが成功した結果であるとみなす。
-        # (execute_tool_node で tool_name はクリアされているため、ここでは tool_name を直接参照しない)
-        if not tool_output.startswith("エラー:"):
-            # 画像生成ツールが成功したとみなす場合
-            print("Tool output (assumed from successful image generation) received. Setting fixed response and image data.")
-            final_response_content = "画像を生成しました！" # 固定の応答メッセージ
-            image_output_base64 = tool_output # Base64画像データを格納
-            # この場合、LLM呼び出しは行わない
-        else:
-            # tool_output がエラーメッセージで始まる場合 (画像生成失敗や他のツールのエラー出力など)
-            print(f"Tool execution resulted in an error or non-image output. Generating response with LLM based on: {tool_output}")
+        image_data_prefix = "image_base64_data::"
+
+        if tool_output.startswith("エラー:"):
+            # 1. エラー出力の場合 (最優先で処理)
+            print(f"Tool execution resulted in an error. Generating response with LLM based on: {tool_output}")
             
             system_message_content = (
                 "あなたはDiscord AIエージェントのプラナです。ユーザーの質問に丁寧かつ的確に答えてください。"
-                "以下のツール実行結果を参考に、ユーザーの質問に答えてください。結果がない場合や関連しない場合は、その旨を伝えてください。\n\n"
-                f"ツール実行結果:\n{tool_output}\n\n" # エラーメッセージや他のツールの結果
+                "以下のツール実行結果（エラーメッセージ）を参考に、ユーザーに状況を伝えてください。\n\n"
+                f"ツール実行結果:\n{tool_output}\n\n"
                 "過去の会話履歴も考慮して、自然な対話を心がけてください。"
             )
             
@@ -466,7 +466,99 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
                 "system_instruction": system_message_content
             })
             final_response_content = response_content_str
-            print(f"LLM generated response based on tool output: {final_response_content}")
+            image_output_base64 = None
+
+
+        elif tool_output.startswith("タイマーを") and "に設定しました。時間になったらお知らせします。" in tool_output:
+            # タイマー設定確認メッセージの場合
+            print("Timer setup confirmation received. Setting response content.")
+            final_response_content = tool_output # ツールからの確認メッセージをそのまま応答とする
+            image_output_base64 = None
+        elif tool_output.startswith("タイマーを") and "に設定しました。時間になったらお知らせします。" in tool_output:
+            # タイマー設定確認メッセージの場合
+            print("Timer setup confirmation received. Setting response content.")
+            final_response_content = tool_output # ツールからの確認メッセージをそのまま応答とする
+            image_output_base64 = None
+        elif "Timer for" in tool_output and "has finished!" in tool_output:
+            # タイマー完了通知の場合 (これは bot.py で処理されるので、ここでは空にする)
+            print("Timer completion notification received. Setting empty response for bot.py to handle.")
+            final_response_content = ""
+            image_output_base64 = None
+
+
+        elif tool_output.startswith(image_data_prefix):
+            # 3. 画像生成成功の場合 (プレフィックスで判定)
+            print("Image generation tool output received. Setting fixed response and image data.")
+            final_response_content = "画像を生成しました！"
+            image_output_base64 = tool_output.split(image_data_prefix, 1)[1] # プレフィックスを除去
+        
+        else:
+            # 4. 上記以外（エラーでなく、タイマーでもなく、画像でもない）のツール出力の場合
+            # (例: remember_information, recall_information, web_search の正常な出力)
+            print(f"Tool execution resulted in non-error, non-timer, non-image output. Generating response with LLM based on: {tool_output}")
+            
+            system_message_content = (
+                "あなたはDiscord AIエージェントのプラナです。ユーザーの質問に丁寧かつ的確に答えてください。"
+                "以下のツール実行結果を参考に、ユーザーの質問に答えてください。\n\n"
+                f"ツール実行結果:\n{tool_output}\n\n"
+                "過去の会話履歴も考慮して、自然な対話を心がけてください。"
+            )
+            
+            converted_chat_history: List[BaseMessage] = []
+            logger.info("--- generate_final_response_node (BEFORE CONVERSION LOOP for LLM call) ---")
+            logger.info(f"Processing chat_history for conversion (length: {len(current_chat_history_at_entry)}):")
+            for i, msg_to_convert in enumerate(current_chat_history_at_entry):
+                logger.info(f"  CONVERTING Item {i}: type={type(msg_to_convert)}, value='{str(msg_to_convert.content)[:100]}...'")
+                if not isinstance(msg_to_convert, BaseMessage):
+                    logger.error(f"  ERROR @ CONVERSION: Item {i} is NOT a BaseMessage subclass! Value: {msg_to_convert}")
+                    continue
+
+                if isinstance(msg_to_convert, HumanMessage):
+                    if isinstance(msg_to_convert.content, list): # マルチモーダルコンテンツの可能性
+                        text_parts = [part["text"] for part in msg_to_convert.content if isinstance(part, dict) and part.get("type") == "text"]
+                        processed_content = "\n".join(text_parts)
+                        has_non_text_attachment = any(
+                            isinstance(part, dict) and part.get("type") != "text" for part in msg_to_convert.content
+                        )
+                        if has_non_text_attachment:
+                            if processed_content:
+                                processed_content += " [添付ファイルあり]"
+                            else:
+                                processed_content = "[添付ファイルあり]"
+                        if not processed_content:
+                            processed_content = "[内容のない添付メッセージ]"
+                        converted_chat_history.append(HumanMessage(content=processed_content))
+                    elif isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(HumanMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"HumanMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(HumanMessage(content="[形式不明のメッセージ]"))
+                
+                elif isinstance(msg_to_convert, AIMessage):
+                    if isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(AIMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"AIMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(AIMessage(content="[形式不明のAI応答]"))
+
+                elif isinstance(msg_to_convert, SystemMessage):
+                    if isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(SystemMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"SystemMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(SystemMessage(content="[形式不明のシステムメッセージ]"))
+                
+                else:
+                    logger.warning(f"Skipping unexpected/unhandled message type during conversion in generate_final_response_node: {type(msg_to_convert)}")
+            
+            response_content_str: str = await llm_chain.ainvoke({
+                "user_input": input_text,
+                "chat_history": converted_chat_history, # 簡略化された履歴を使用
+                "system_instruction": system_message_content
+            })
+            final_response_content = response_content_str
+            image_output_base64 = None
+
     else:
         final_response_content = "申し訳ありません、応答を生成できませんでした。"
         print("No direct response or tool output to generate final response.")

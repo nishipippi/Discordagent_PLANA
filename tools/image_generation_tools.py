@@ -4,7 +4,7 @@ import os
 from typing import Type
 
 from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_core.tools import BaseTool, StructuredTool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -48,9 +48,9 @@ async def _image_generation_func(prompt: str) -> str:
             raise ValueError("No image URL found in the AI message response.")
 
         image_base64 = _get_image_base64(response)
-        return image_base64
+        return f"image_base64_data::{image_base64}" # プレフィックスを付けて返す
     except Exception as e:
-        return f"Error generating image: {e}"
+        return f"Error generating image: {e}" # エラー時はプレフィックスなし
 
 image_generation_tool = StructuredTool.from_function(
     func=_image_generation_func,

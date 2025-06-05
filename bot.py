@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 # tools.discord_tools は nodes.py の fetch_chat_history で使用
 # from tools.discord_tools import get_discord_messages
 from tools.db_utils import init_db, load_chat_history, save_chat_history
+from tools.timer_tools import create_timer_tool # create_timer_tool をインポート
 from typing import Dict, Optional, Literal, Any, List # List を確認
 import logging # logging をインポート
 import base64 # base64 をインポート
@@ -23,8 +24,10 @@ import io # io をインポート
 import aiohttp # aiohttp をインポート (非同期HTTPリクエスト用)
 
 from tools.vector_store_utils import VectorStoreManager
-# llm_config は nodes.py で使用
-# from llm_config import get_google_api_key
+from tools.brave_search import BraveSearchTool # BraveSearchTool クラスをインポート
+from tools.memory_tools import remember_tool, recall_tool
+from tools.image_generation_tools import image_generation_tool
+from langchain_core.tools import BaseTool # BaseTool をインポート
 
 # .envファイルから環境変数を読み込む
 load_dotenv()
@@ -61,7 +64,22 @@ class MyBot(commands.Bot):
             print(f"予期せぬエラーでベクトルストアの初期化に失敗: {e}")
 
 bot = MyBot(command_prefix='!', intents=intents)
-set_bot_instance_for_nodes(bot) # ★★★ botインスタンスをnodes.pyに渡す ★★★
+
+# すべてのツールをリストにまとめる
+# botインスタンスを必要とするツールはここで初期化
+ALL_TOOLS: List[BaseTool] = [
+    BraveSearchTool(),
+    remember_tool,
+    recall_tool,
+    image_generation_tool,
+    create_timer_tool(bot) # botインスタンスを渡してタイマーツールを作成
+]
+tool_map: Dict[str, BaseTool] = {tool.name: tool for tool in ALL_TOOLS} # tool_map を作成
+
+set_bot_instance_for_nodes(bot, tool_map) # botインスタンスとtool_mapをnodes.pyに渡す
+
+# LangGraphグラフの構築
+workflow = StateGraph(AgentState)
 
 # LangGraphグラフの構築
 workflow = StateGraph(AgentState)
@@ -220,6 +238,7 @@ async def on_message(message: discord.Message): # message の型ヒントを dis
                 except Exception as img_e:
                     print(f"Error sending image to Discord: {img_e}")
                     await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)')
+            # タイマー完了メッセージの送信ロジックは tools/timer_tools.py に移動したため削除
             else:
                 await message.channel.send(f'{message.author.mention} {ai_response_content}')
 
