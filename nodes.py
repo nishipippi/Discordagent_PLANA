@@ -176,30 +176,69 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
     )
 
     messages_for_prompt: List[BaseMessage] = [SystemMessage(content=formatted_system_instruction)]
-    # chat_history の各メッセージを適切な具象型に変換しつつ追加
+    # chat_history の各メッセージを処理し、LLMに渡す形式に変換
     for msg in chat_history:
-        if isinstance(msg, BaseMessage):
-            # BaseMessage の type 属性を利用して具象型に変換
-            if hasattr(msg, 'type'):
-                if msg.type == 'human':
-                    messages_for_prompt.append(HumanMessage(content=msg.content))
-                elif msg.type == 'ai':
-                    messages_for_prompt.append(AIMessage(content=msg.content))
-                elif msg.type == 'system': # SystemMessage も考慮
-                    messages_for_prompt.append(SystemMessage(content=msg.content))
-                else:
-                    logger.warning(f"Skipping BaseMessage with unhandled type '{msg.type}': {type(msg)}, Content: {msg.content[:50]}...")
+        if isinstance(msg, HumanMessage):
+            if isinstance(msg.content, list): # マルチモーダルコンテンツの可能性
+                # テキスト部分のみを抽出し、添付ファイルがあったことを示す情報を付加する
+                text_parts = [part["text"] for part in msg.content if isinstance(part, dict) and part.get("type") == "text"]
+                processed_content = "\n".join(text_parts)
+                # 元のメッセージにテキスト以外の要素（画像やPDFなど）があったかどうかのフラグ
+                has_non_text_attachment = any(
+                    isinstance(part, dict) and part.get("type") != "text" for part in msg.content
+                )
+                if has_non_text_attachment:
+                    if processed_content:
+                        processed_content += " [添付ファイルあり]"
+                    else:
+                        processed_content = "[添付ファイルあり]"
+                
+                if not processed_content: # テキスト部分も何もなかった場合 (通常は考えにくいが念のため)
+                    processed_content = "[内容のない添付メッセージ]"
+                messages_for_prompt.append(HumanMessage(content=processed_content))
+            elif isinstance(msg.content, str):
+                # content が文字列の場合はそのまま
+                messages_for_prompt.append(HumanMessage(content=msg.content))
             else:
-                # type 属性がない場合は、content から推測するか、スキップ
-                # ここでは安全のためスキップ
-                logger.warning(f"Skipping BaseMessage without 'type' attribute: {type(msg)}, Content: {msg.content[:50]}...")
-        elif isinstance(msg, (HumanMessage, AIMessage, SystemMessage)): # 既に具象型であればそのまま追加
-            messages_for_prompt.append(msg)
-        else:
-            logger.warning(f"Skipping unexpected message type in chat_history: {type(msg)}")
-            continue
-    messages_for_prompt.append(HumanMessage(content=input_text)) # input_text を直接渡す
+                # HumanMessage の content が予期せぬ型の場合
+                logger.warning(f"HumanMessage with unexpected content type: {type(msg.content)}. Content: {str(msg.content)[:100]}...")
+                messages_for_prompt.append(HumanMessage(content="[形式不明のメッセージ]"))
 
+        elif isinstance(msg, AIMessage):
+            # AIMessage の content は現状文字列と想定。もし将来的にマルチモーダルになる場合は同様の処理が必要。
+            if isinstance(msg.content, str):
+                messages_for_prompt.append(AIMessage(content=msg.content))
+            else:
+                logger.warning(f"AIMessage with unexpected content type: {type(msg.content)}. Content: {str(msg.content)[:100]}...")
+                messages_for_prompt.append(AIMessage(content="[形式不明のAI応答]"))
+
+        elif isinstance(msg, SystemMessage):
+            if isinstance(msg.content, str):
+                messages_for_prompt.append(SystemMessage(content=msg.content))
+            else:
+                logger.warning(f"SystemMessage with unexpected content type: {type(msg.content)}. Content: {str(msg.content)[:100]}...")
+                messages_for_prompt.append(SystemMessage(content="[形式不明のシステムメッセージ]"))
+        
+        # ToolMessage の扱いは現状のコードにはないが、もし追加するなら content を確認・簡略化
+        # elif isinstance(msg, ToolMessage):
+        #     # ToolMessage の content が長大な場合は簡略化を検討
+        #     if isinstance(msg.content, str) and len(msg.content) > 500: # 例: 500文字を超える場合は簡略化
+        #         messages_for_prompt.append(ToolMessage(content=f"[ツール実行結果あり: {msg.tool_call_id}]", tool_call_id=msg.tool_call_id))
+        #     else:
+        #         messages_for_prompt.append(msg)
+
+        else:
+            # 予期せぬメッセージタイプの場合 (BaseMessage だが Human/AI/System ではないなど)
+            # ログには残すが、LLMへの履歴には含めないか、あるいは安全な形式で含める
+            logger.warning(f"Skipping unexpected message type in chat_history for LLM prompt: {type(msg)}")
+            continue # スキップする
+
+    # 現在のユーザー入力 (input_text) は、process_attachments_node で
+    # 既に chat_history の最後の HumanMessage にマージされているか、
+    # あるいは chat_history に input_text のみの HumanMessage が追加されているはず。
+    # そのため、ここで再度 messages_for_prompt.append(HumanMessage(content=input_text)) を行うと、
+    # 最新のユーザー入力が二重に追加される可能性がある。
+    # messages_for_prompt.append(HumanMessage(content=input_text)) # ★削除またはコメントアウト★
     prompt_template = ChatPromptTemplate.from_messages(messages_for_prompt)
 
     # LLMにツールをバインドする代わりに、structured_output を使用
@@ -366,68 +405,104 @@ async def generate_final_response_node(state: AgentState) -> AgentState:
             logger.error(f"  ERROR @ ENTRY: Item {i} is NOT a BaseMessage subclass! Value: {item}")
 
     final_response_content = ""
+    image_output_base64: Optional[str] = None # image_output_base64 をここで初期化
 
     if llm_direct_response:
         final_response_content = llm_direct_response
         print(f"Direct LLM response: {final_response_content}")
     elif tool_output:
-        system_message_content = (
-            "あなたはDiscord AIエージェントのプラナです。ユーザーの質問に丁寧かつ的確に答えてください。"
-            "以下のツール実行結果を参考に、ユーザーの質問に答えてください。結果がない場合や関連しない場合は、その旨を伝えてください。\n\n"
-            f"ツール実行結果:\n{tool_output}\n\n"
-            "過去の会話履歴も考慮して、自然な対話を心がけてください。"
-        )
-        converted_chat_history: List[BaseMessage] = []
-        logger.info("--- generate_final_response_node (BEFORE CONVERSION LOOP) ---")
-        logger.info(f"Processing chat_history for conversion (length: {len(current_chat_history_at_entry)}):")
-        for i, msg_to_convert in enumerate(current_chat_history_at_entry):
-            logger.info(f"  CONVERTING Item {i}: type={type(msg_to_convert)}, value='{str(msg_to_convert)[:100]}...'")
-            if not isinstance(msg_to_convert, BaseMessage):
-                logger.error(f"  ERROR @ CONVERSION: Item {i} is NOT a BaseMessage subclass! Value: {msg_to_convert}")
-                continue
+        # tool_output が存在し、かつエラーメッセージで始まらない場合、
+        # それは画像生成ツールが成功した結果であるとみなす。
+        # (execute_tool_node で tool_name はクリアされているため、ここでは tool_name を直接参照しない)
+        if not tool_output.startswith("エラー:"):
+            # 画像生成ツールが成功したとみなす場合
+            print("Tool output (assumed from successful image generation) received. Setting fixed response and image data.")
+            final_response_content = "画像を生成しました！" # 固定の応答メッセージ
+            image_output_base64 = tool_output # Base64画像データを格納
+            # この場合、LLM呼び出しは行わない
+        else:
+            # tool_output がエラーメッセージで始まる場合 (画像生成失敗や他のツールのエラー出力など)
+            print(f"Tool execution resulted in an error or non-image output. Generating response with LLM based on: {tool_output}")
+            
+            system_message_content = (
+                "あなたはDiscord AIエージェントのプラナです。ユーザーの質問に丁寧かつ的確に答えてください。"
+                "以下のツール実行結果を参考に、ユーザーの質問に答えてください。結果がない場合や関連しない場合は、その旨を伝えてください。\n\n"
+                f"ツール実行結果:\n{tool_output}\n\n" # エラーメッセージや他のツールの結果
+                "過去の会話履歴も考慮して、自然な対話を心がけてください。"
+            )
+            
+            converted_chat_history: List[BaseMessage] = []
+            logger.info("--- generate_final_response_node (BEFORE CONVERSION LOOP for LLM call) ---")
+            logger.info(f"Processing chat_history for conversion (length: {len(current_chat_history_at_entry)}):")
+            for i, msg_to_convert in enumerate(current_chat_history_at_entry):
+                logger.info(f"  CONVERTING Item {i}: type={type(msg_to_convert)}, value='{str(msg_to_convert.content)[:100]}...'")
+                if not isinstance(msg_to_convert, BaseMessage):
+                    logger.error(f"  ERROR @ CONVERSION: Item {i} is NOT a BaseMessage subclass! Value: {msg_to_convert}")
+                    continue
 
-            if hasattr(msg_to_convert, 'type') and msg_to_convert.type == 'human':
-                converted_chat_history.append(HumanMessage(content=msg_to_convert.content))
-            elif hasattr(msg_to_convert, 'type') and msg_to_convert.type == 'ai':
-                converted_chat_history.append(AIMessage(content=msg_to_convert.content))
-            elif hasattr(msg_to_convert, 'type') and msg_to_convert.type == 'system':
-                converted_chat_history.append(SystemMessage(content=msg_to_convert.content))
-            elif isinstance(msg_to_convert, (HumanMessage, AIMessage, SystemMessage)):
-                 converted_chat_history.append(msg_to_convert)
-            else:
-                logger.warning(f"Skipping unexpected/unhandled message type during conversion: {type(msg_to_convert)}")
-        
-        response_content_str: str = await llm_chain.ainvoke({ # 型ヒントを str に変更
-            "user_input": input_text,
-            "chat_history": converted_chat_history,
-            "system_instruction": system_message_content
-        })
-        final_response_content = response_content_str # llm_chain の結果を直接使用
-        print(f"LLM generated response based on tool output: {final_response_content}")
+                if isinstance(msg_to_convert, HumanMessage):
+                    if isinstance(msg_to_convert.content, list): # マルチモーダルコンテンツの可能性
+                        text_parts = [part["text"] for part in msg_to_convert.content if isinstance(part, dict) and part.get("type") == "text"]
+                        processed_content = "\n".join(text_parts)
+                        has_non_text_attachment = any(
+                            isinstance(part, dict) and part.get("type") != "text" for part in msg_to_convert.content
+                        )
+                        if has_non_text_attachment:
+                            if processed_content:
+                                processed_content += " [添付ファイルあり]"
+                            else:
+                                processed_content = "[添付ファイルあり]"
+                        if not processed_content:
+                            processed_content = "[内容のない添付メッセージ]"
+                        converted_chat_history.append(HumanMessage(content=processed_content))
+                    elif isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(HumanMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"HumanMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(HumanMessage(content="[形式不明のメッセージ]"))
+                
+                elif isinstance(msg_to_convert, AIMessage):
+                    if isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(AIMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"AIMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(AIMessage(content="[形式不明のAI応答]"))
+
+                elif isinstance(msg_to_convert, SystemMessage):
+                    if isinstance(msg_to_convert.content, str):
+                        converted_chat_history.append(SystemMessage(content=msg_to_convert.content))
+                    else:
+                        logger.warning(f"SystemMessage with unexpected content type in generate_final_response_node: {type(msg_to_convert.content)}. Content: {str(msg_to_convert.content)[:100]}...")
+                        converted_chat_history.append(SystemMessage(content="[形式不明のシステムメッセージ]"))
+                
+                else:
+                    logger.warning(f"Skipping unexpected/unhandled message type during conversion in generate_final_response_node: {type(msg_to_convert)}")
+            
+            response_content_str: str = await llm_chain.ainvoke({
+                "user_input": input_text,
+                "chat_history": converted_chat_history, # 簡略化された履歴を使用
+                "system_instruction": system_message_content
+            })
+            final_response_content = response_content_str
+            print(f"LLM generated response based on tool output: {final_response_content}")
     else:
         final_response_content = "申し訳ありません、応答を生成できませんでした。"
         print("No direct response or tool output to generate final response.")
 
     updated_chat_history = current_chat_history_at_entry + [AIMessage(content=final_response_content)]
 
-    # 画像生成ツールの出力であれば、image_output_base64 に格納
-    image_output_base64: Optional[str] = None
-    if tool_name == "image_generation_tool" and tool_output and not tool_output.startswith("エラー:"):
-        image_output_base64 = tool_output
-        final_response_content = "画像を生成しました！" # 画像生成成功時のメッセージ
-
     return AgentState(
         input_text=input_text,
-        chat_history=updated_chat_history,
+        chat_history=updated_chat_history, # AIの最終応答を含む更新された履歴
         server_id=state.server_id,
         channel_id=state.channel_id,
         user_id=state.user_id,
         thread_id=state.thread_id,
-        llm_direct_response=final_response_content,
-        tool_name=None,
-        tool_args=None,
+        llm_direct_response=final_response_content, # 最終的なテキスト応答
+        tool_name=None, # ツール情報はクリア
+        tool_args=None, # ツール情報はクリア
         tool_output=None, # ツール出力は処理済みなのでクリア
-        image_output_base64=image_output_base64, # 画像データを格納
+        image_output_base64=image_output_base64, # 画像生成成功時はBase64データ、それ以外はNone
         search_query=None,
         search_results=None,
         should_search_decision=None
