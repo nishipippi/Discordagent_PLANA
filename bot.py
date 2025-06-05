@@ -127,7 +127,7 @@ app = workflow.compile()
 
 class FollowupButton(Button):
     def __init__(self, label: str, custom_id: str, bot_instance: MyBot):
-        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=custom_id)
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id) # 修正
         self.bot_instance = bot_instance
 
     async def callback(self, interaction: discord.Interaction):
@@ -190,7 +190,7 @@ class FollowupButton(Button):
                     if isinstance(item, discord.ActionRow):
                         for child in item.children:
                             if isinstance(child, discord.ui.Button):
-                                new_button = Button(label=child.label, style=child.style, custom_id=child.custom_id, disabled=True)
+                                new_button = Button(label=child.label, style=discord.ButtonStyle.secondary, custom_id=child.custom_id, disabled=True) # 修正
                                 disabled_view.add_item(new_button)
                 try:
                     await interaction.message.edit(view=disabled_view)
