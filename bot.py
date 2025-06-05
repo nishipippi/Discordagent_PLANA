@@ -193,10 +193,27 @@ class FollowupButton(Button):
                         FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=self.bot_instance)
                     )
             
-            await interaction.followup.send(
-                f'{interaction.user.mention} {ai_response_content}', 
-                view=followup_view_after_button_click
-            )
+            if final_state.image_output_base64:
+                try:
+                    image_bytes = base64.b64decode(final_state.image_output_base64)
+                    image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
+                    await interaction.followup.send(
+                        f'{interaction.user.mention} {ai_response_content}',
+                        file=image_file,
+                        view=followup_view_after_button_click
+                    )
+                    print("Generated image sent to Discord (Followup).")
+                except Exception as img_e:
+                    print(f"Error sending image to Discord (Followup): {img_e}")
+                    await interaction.followup.send(
+                        f'{interaction.user.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)',
+                        view=followup_view_after_button_click
+                    )
+            else:
+                await interaction.followup.send(
+                    f'{interaction.user.mention} {ai_response_content}',
+                    view=followup_view_after_button_click
+                )
 
             if interaction.message:
                 disabled_view = View(timeout=None)
