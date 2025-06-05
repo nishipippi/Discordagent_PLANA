@@ -115,9 +115,21 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
     # 直近のメッセージを取得 (例: 過去10件)
     new_messages = await get_discord_messages(_bot_instance, channel_id, limit=10)
     
-    # 既存のチャット履歴に新しいメッセージを追加
-    # 重複を避けるため、新しいメッセージが既存の履歴にないか確認するロジックを追加することも検討
-    updated_chat_history = state.chat_history + new_messages
+    # ここで新しいメッセージにプレフィックスを付与
+    prefixed_new_messages: List[BaseMessage] = []
+    for msg in new_messages:
+        if isinstance(msg, HumanMessage):
+            # content がリストの場合も考慮して文字列に変換
+            content_str = str(msg.content) if isinstance(msg.content, list) else msg.content
+            prefixed_new_messages.append(HumanMessage(content=f"[過去の会話] Human: {content_str}"))
+        elif isinstance(msg, AIMessage):
+            prefixed_new_messages.append(AIMessage(content=f"[過去の会話] AI: {msg.content}"))
+        else:
+            # その他のメッセージタイプはそのまま追加（またはスキップ）
+            prefixed_new_messages.append(msg)
+
+    # 既存のチャット履歴にプレフィックス付きの新しいメッセージを追加
+    updated_chat_history = state.chat_history + prefixed_new_messages
     
     # 履歴の長さを制限 (例: 最新の5件を保持)
     max_history_length = 5
