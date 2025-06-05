@@ -179,33 +179,17 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
     # chat_history の各メッセージを処理し、LLMに渡す形式に変換
     for msg in chat_history:
         if isinstance(msg, HumanMessage):
-            if isinstance(msg.content, list): # マルチモーダルコンテンツの可能性
-                # テキスト部分のみを抽出し、添付ファイルがあったことを示す情報を付加する
-                text_parts = [part["text"] for part in msg.content if isinstance(part, dict) and part.get("type") == "text"]
-                processed_content = "\n".join(text_parts)
-                # 元のメッセージにテキスト以外の要素（画像やPDFなど）があったかどうかのフラグ
-                has_non_text_attachment = any(
-                    isinstance(part, dict) and part.get("type") != "text" for part in msg.content
-                )
-                if has_non_text_attachment:
-                    if processed_content:
-                        processed_content += " [添付ファイルあり]"
-                    else:
-                        processed_content = "[添付ファイルあり]"
-                
-                if not processed_content: # テキスト部分も何もなかった場合 (通常は考えにくいが念のため)
-                    processed_content = "[内容のない添付メッセージ]"
-                messages_for_prompt.append(HumanMessage(content=processed_content))
+            # HumanMessage の content がリストの場合（マルチモーダルコンテンツ）はそのまま渡す
+            # これにより、LLMは画像データを直接参照できるようになる
+            if isinstance(msg.content, list):
+                messages_for_prompt.append(HumanMessage(content=msg.content))
             elif isinstance(msg.content, str):
-                # content が文字列の場合はそのまま
                 messages_for_prompt.append(HumanMessage(content=msg.content))
             else:
-                # HumanMessage の content が予期せぬ型の場合
                 logger.warning(f"HumanMessage with unexpected content type: {type(msg.content)}. Content: {str(msg.content)[:100]}...")
                 messages_for_prompt.append(HumanMessage(content="[形式不明のメッセージ]"))
 
         elif isinstance(msg, AIMessage):
-            # AIMessage の content は現状文字列と想定。もし将来的にマルチモーダルになる場合は同様の処理が必要。
             if isinstance(msg.content, str):
                 messages_for_prompt.append(AIMessage(content=msg.content))
             else:
@@ -228,8 +212,6 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
         #         messages_for_prompt.append(msg)
 
         else:
-            # 予期せぬメッセージタイプの場合 (BaseMessage だが Human/AI/System ではないなど)
-            # ログには残すが、LLMへの履歴には含めないか、あるいは安全な形式で含める
             logger.warning(f"Skipping unexpected message type in chat_history for LLM prompt: {type(msg)}")
             continue # スキップする
 
