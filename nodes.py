@@ -133,7 +133,7 @@ async def fetch_chat_history(state: AgentState) -> AgentState:
 
     updated_chat_history = state.chat_history + prefixed_new_messages
     
-    max_history_length = 1
+    max_history_length = 5
     if len(updated_chat_history) > max_history_length:
         updated_chat_history = updated_chat_history[-max_history_length:]
 
