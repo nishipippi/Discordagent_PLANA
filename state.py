@@ -13,6 +13,7 @@ class AgentState(BaseModel):
     # --- For Tool Calling ---
     tool_name: Optional[str] = Field(default=None) # LLMが呼び出すと判断したツール名
     tool_args: Optional[Dict[str, Any]] = Field(default=None) # LLMが生成したツール引数
+    tool_input: Optional[Dict[str, Any]] = Field(default=None) # LLMが生成したツール引数 (生の形式)
     tool_output: Optional[str] = Field(default=None) # ツールの実行結果
     # --- For Search (既存のものを統合または置換) ---
     search_query: Optional[str] = Field(default=None) # 既存

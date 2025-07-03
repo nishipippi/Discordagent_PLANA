@@ -38,11 +38,11 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_chat_history(channel_id: int, chat_history: List[BaseMessage]):
+def save_chat_history(channel_id: str, chat_history: List[BaseMessage]):
     """指定されたチャンネルのチャット履歴をデータベースに保存する。"""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM conversation_history WHERE channel_id = ?", (channel_id,))
+    cursor.execute("DELETE FROM conversation_history WHERE channel_id = ?", (str(channel_id),))
 
     for i, msg in enumerate(chat_history):
         message_type = ""
@@ -69,7 +69,7 @@ def save_chat_history(channel_id: int, chat_history: List[BaseMessage]):
         if message_type: # message_type が設定されていれば保存
             cursor.execute(
                 "INSERT INTO conversation_history (channel_id, message_index, message_type, content) VALUES (?, ?, ?, ?)",
-                (channel_id, i, message_type, content_to_save)
+                (str(channel_id), i, message_type, content_to_save)
             )
         else:
             print(f"Warning: Unknown message type for message at index {i}. Skipping save.")
@@ -77,13 +77,13 @@ def save_chat_history(channel_id: int, chat_history: List[BaseMessage]):
     conn.commit()
     conn.close()
 
-def load_chat_history(channel_id: int) -> List[BaseMessage]:
+def load_chat_history(channel_id: str) -> List[BaseMessage]:
     """指定されたチャンネルのチャット履歴をデータベースからロードする。"""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     cursor.execute(
         "SELECT message_type, content FROM conversation_history WHERE channel_id = ? ORDER BY message_index",
-        (channel_id,)
+        (str(channel_id),)
     )
     messages: List[BaseMessage] = []
     for row in cursor.fetchall():

@@ -119,6 +119,174 @@ workflow.add_edge("generate_followups", END)
 
 app = workflow.compile()
 
+# Workflowファイルを動的に読み込む関数
+def get_workflow_files() -> List[str]:
+    workflow_dir = "workflows"
+    if not os.path.exists(workflow_dir):
+        return []
+    return [f for f in os.listdir(workflow_dir) if f.endswith(".json")]
+
+class WorkflowButton(Button):
+    def __init__(self, label: str, custom_id: str, bot_instance: MyBot, original_message: discord.Message, positive_prompt: str, negative_prompt: str):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=custom_id)
+        self.bot_instance = bot_instance
+        self.original_message = original_message
+        self.positive_prompt = positive_prompt
+        self.negative_prompt = negative_prompt
+
+    async def callback(self, interaction: discord.Interaction):
+        if self.disabled or (self.view and self.view.is_finished()):
+            await interaction.response.defer()
+            return
+
+        selected_workflow_file = self.label # ボタンのラベルがファイル名
+        channel_id = interaction.channel_id
+        server_id = str(interaction.guild_id) if interaction.guild else "DM"
+        user_id = str(interaction.user.id)
+        thread_id = interaction.channel.id if isinstance(interaction.channel, discord.Thread) else None
+
+        progress_message: Optional[discord.Message] = None
+        try:
+            if isinstance(interaction.channel, (discord.TextChannel, discord.DMChannel, discord.Thread)):
+                progress_message = await interaction.channel.send(f"{interaction.user.mention} `{selected_workflow_file}` を使用して画像を生成中です...")
+            await interaction.response.defer()
+        except discord.HTTPException as e:
+            print(f"進捗メッセージの送信に失敗 (WorkflowButton): {e}")
+            if not interaction.response.is_done():
+                 await interaction.response.send_message("処理を開始できませんでした。", ephemeral=True)
+            return
+
+        loaded_chat_history = load_chat_history(str(channel_id))
+        print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id} (WorkflowButton)")
+
+        # LangGraphに渡すツール呼び出し情報を構築
+        tool_call_input = {
+            "positive_prompt": self.positive_prompt,
+            "negative_prompt": self.negative_prompt,
+            "workflow_file": selected_workflow_file
+        }
+        
+        initial_state_dict = {
+            "input_text": f"画像生成: {self.positive_prompt} (Workflow: {selected_workflow_file})", # ログ用
+            "chat_history": loaded_chat_history + [HumanMessage(content=f"画像生成の指示: {self.positive_prompt}")],
+            "server_id": server_id,
+            "channel_id": channel_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "attachments": [],
+            "tool_name": "image_generation_tool", # image_generation_toolを直接呼び出す
+            "tool_input": tool_call_input,
+            "progress_message_id": progress_message.id if progress_message else None,
+            "progress_channel_id": progress_message.channel.id if progress_message else None,
+        }
+        current_state = AgentState(**initial_state_dict)
+
+        try:
+            print("Invoking LangGraph app for image generation (WorkflowButton)...")
+            final_state_dict = await app.ainvoke(current_state.model_dump())
+            final_state = AgentState(**final_state_dict)
+            print("LangGraph app finished for image generation (WorkflowButton).")
+
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except discord.NotFound:
+                    print("進捗メッセージが見つからず削除できませんでした (WorkflowButton)。")
+                except discord.Forbidden:
+                    print("進捗メッセージの削除権限がありません (WorkflowButton)。")
+                except Exception as e:
+                    print(f"進捗メッセージの削除中にエラー (WorkflowButton): {e}")
+
+            ai_response_content = final_state.llm_direct_response or "申し訳ありません、応答を生成できませんでした。"
+            
+            history_to_save = final_state.chat_history
+            save_chat_history(str(channel_id), history_to_save)
+
+            # ワークフロー選択メッセージのボタンを無効化
+            if interaction.message:
+                disabled_view = View(timeout=None)
+                for item in interaction.message.components:
+                    if isinstance(item, discord.ActionRow):
+                        for child in item.children:
+                            if isinstance(child, discord.ui.Button):
+                                new_button = Button(label=child.label, style=discord.ButtonStyle.secondary, custom_id=child.custom_id, disabled=True)
+                                disabled_view.add_item(new_button)
+                try:
+                    await interaction.message.edit(view=disabled_view)
+                except discord.NotFound:
+                    pass
+
+            # 画像と応答を送信
+            if final_state.image_output_base64:
+                try:
+                    image_bytes = base64.b64decode(final_state.image_output_base64)
+                    image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
+                    await interaction.followup.send(
+                        f'{interaction.user.mention} {ai_response_content}',
+                        file=image_file
+                    )
+                    print("Generated image sent to Discord (WorkflowButton).")
+                except Exception as img_e:
+                    print(f"Error sending image to Discord (WorkflowButton): {img_e}")
+                    await interaction.followup.send(
+                        f'{interaction.user.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)'
+                    )
+            else:
+                await interaction.followup.send(
+                    f'{interaction.user.mention} {ai_response_content}'
+                )
+
+        except Exception as e:
+            print(f"LangGraphの実行中にエラーが発生しました (WorkflowButton): {e}")
+            if progress_message:
+                try:
+                    await progress_message.delete()
+                except Exception:
+                    pass
+            if not interaction.response.is_done():
+                 await interaction.response.send_message(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。", ephemeral=True)
+            else:
+                 await interaction.followup.send(f"{interaction.user.mention} 申し訳ありません、処理中にエラーが発生しました。", ephemeral=True)
+
+
+class WorkflowSelectionView(View):
+    def __init__(self, original_message: discord.Message, positive_prompt: str, negative_prompt: str, bot_instance: MyBot):
+        super().__init__(timeout=180)
+        self.original_message = original_message
+        self.positive_prompt = positive_prompt
+        self.negative_prompt = negative_prompt
+        self.bot_instance = bot_instance
+        self.add_workflow_buttons()
+
+    def add_workflow_buttons(self):
+        workflow_files = get_workflow_files()
+        if not workflow_files:
+            self.add_item(Button(label="ワークフローファイルが見つかりません", style=discord.ButtonStyle.red, disabled=True))
+            return
+        
+        for i, wf_name in enumerate(workflow_files):
+            custom_id = f"workflow_select_{self.original_message.id}_{i}"
+            self.add_item(
+                WorkflowButton(
+                    label=wf_name,
+                    custom_id=custom_id,
+                    bot_instance=self.bot_instance,
+                    original_message=self.original_message,
+                    positive_prompt=self.positive_prompt,
+                    negative_prompt=self.negative_prompt
+                )
+            )
+
+    async def on_timeout(self):
+        # タイムアウト時にボタンを無効化
+        for item in self.children:
+            if isinstance(item, Button):
+                item.disabled = True
+        try:
+            await self.original_message.edit(content="ワークフロー選択の時間が過ぎました。", view=self)
+        except discord.NotFound:
+            pass # メッセージが削除されている場合は何もしない
+
 class FollowupButton(Button):
     def __init__(self, label: str, custom_id: str, bot_instance: MyBot):
         super().__init__(label=label, style=discord.ButtonStyle.secondary, custom_id=custom_id)
@@ -137,7 +305,8 @@ class FollowupButton(Button):
 
         progress_message: Optional[discord.Message] = None
         try:
-            progress_message = await interaction.channel.send(f"{interaction.user.mention} `{user_input_text}` について考え中です...")
+            if isinstance(interaction.channel, (discord.TextChannel, discord.DMChannel, discord.Thread)):
+                progress_message = await interaction.channel.send(f"{interaction.user.mention} `{user_input_text}` について考え中です...")
             await interaction.response.defer()
         except discord.HTTPException as e:
             print(f"進捗メッセージの送信に失敗 (FollowupButton): {e}")
@@ -145,12 +314,12 @@ class FollowupButton(Button):
                  await interaction.response.send_message("処理を開始できませんでした。", ephemeral=True)
             return
 
-        loaded_chat_history = load_chat_history(channel_id)
+        loaded_chat_history = load_chat_history(str(channel_id))
         print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id} (Followup)")
 
         initial_state_dict = {
             "input_text": user_input_text,
-            "chat_history": loaded_chat_history + [HumanMessage(content=user_input_text)],
+            "chat_history": loaded_chat_history + [HumanMessage(content=str(user_input_text))],
             "server_id": server_id,
             "channel_id": channel_id,
             "user_id": user_id,
@@ -182,7 +351,7 @@ class FollowupButton(Button):
                 ai_response_content = "申し訳ありません、応答を生成できませんでした。"
             
             history_to_save = final_state.chat_history
-            save_chat_history(channel_id, history_to_save)
+            save_chat_history(str(channel_id), history_to_save)
 
             followup_view_after_button_click = None
             if final_state.followup_questions:
@@ -197,23 +366,39 @@ class FollowupButton(Button):
                 try:
                     image_bytes = base64.b64decode(final_state.image_output_base64)
                     image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
-                    await interaction.followup.send(
-                        f'{interaction.user.mention} {ai_response_content}',
-                        file=image_file,
-                        view=followup_view_after_button_click
-                    )
+                    if followup_view_after_button_click:
+                        await interaction.followup.send(
+                            f'{interaction.user.mention} {ai_response_content}',
+                            file=image_file,
+                            view=followup_view_after_button_click
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f'{interaction.user.mention} {ai_response_content}',
+                            file=image_file
+                        )
                     print("Generated image sent to Discord (Followup).")
                 except Exception as img_e:
                     print(f"Error sending image to Discord (Followup): {img_e}")
+                    if followup_view_after_button_click:
+                        await interaction.followup.send(
+                            f'{interaction.user.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)',
+                            view=followup_view_after_button_click
+                        )
+                    else:
+                        await interaction.followup.send(
+                            f'{interaction.user.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)'
+                        )
+            else:
+                if followup_view_after_button_click:
                     await interaction.followup.send(
-                        f'{interaction.user.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)',
+                        f'{interaction.user.mention} {ai_response_content}',
                         view=followup_view_after_button_click
                     )
-            else:
-                await interaction.followup.send(
-                    f'{interaction.user.mention} {ai_response_content}',
-                    view=followup_view_after_button_click
-                )
+                else:
+                    await interaction.followup.send(
+                        f'{interaction.user.mention} {ai_response_content}'
+                    )
 
             if interaction.message:
                 disabled_view = View(timeout=None)
@@ -267,7 +452,8 @@ async def on_message(message: discord.Message):
 
         progress_message: Optional[discord.Message] = None
         try:
-            progress_message = await message.channel.send(f"{message.author.mention} `{user_input_text[:50]}{'...' if len(user_input_text) > 50 else ''}` について考え中です...")
+            if isinstance(message.channel, (discord.TextChannel, discord.DMChannel, discord.Thread)):
+                progress_message = await message.channel.send(f"{message.author.mention} `{user_input_text[:50]}{'...' if len(user_input_text) > 50 else ''}` について考え中です...")
         except discord.HTTPException as e:
             print(f"進捗メッセージの送信に失敗 (on_message): {e}")
 
@@ -305,7 +491,7 @@ async def on_message(message: discord.Message):
                 except Exception as e:
                     print(f"Error processing attachment {attachment.filename}: {e}")
 
-        loaded_chat_history = load_chat_history(channel_id)
+        loaded_chat_history = load_chat_history(str(channel_id))
         print(f"Loaded {len(loaded_chat_history)} messages from history for channel {channel_id}")
 
         initial_state_dict = {
@@ -338,35 +524,62 @@ async def on_message(message: discord.Message):
                 except Exception as e:
                     print(f"進捗メッセージの削除中にエラー (on_message): {e}")
 
-            ai_response_content = final_state.llm_direct_response
-            if not ai_response_content:
-                ai_response_content = "申し訳ありません、応答を生成できませんでした。"
-                print("Error: llm_direct_response is empty in final_state.")
-            
+            ai_response_content = final_state.llm_direct_response or "申し訳ありません、応答を生成できませんでした。"
             print(f"Final AI response: {ai_response_content}")
 
             history_to_save = final_state.chat_history 
-            save_chat_history(channel_id, history_to_save)
+            save_chat_history(str(channel_id), history_to_save)
             print(f"Saved {len(history_to_save)} messages to history for channel {channel_id}")
 
-            followup_view = None
-            if final_state.followup_questions:
-                followup_view = View(timeout=180)
-                for i, q_text in enumerate(final_state.followup_questions):
-                    button_custom_id = f"followup_{message.id}_{i}"
-                    followup_view.add_item(FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=bot))
-            
-            if final_state.image_output_base64:
-                try:
-                    image_bytes = base64.b64decode(final_state.image_output_base64)
-                    image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
-                    await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file, view=followup_view)
-                    print("Generated image sent to Discord.")
-                except Exception as img_e:
-                    print(f"Error sending image to Discord: {img_e}")
-                    await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)', view=followup_view)
+            if final_state.tool_name == "image_generation_tool":
+                # 画像生成ツールが選択された場合、ワークフロー選択ボタンを表示
+                positive_prompt = ""
+                negative_prompt = ""
+                if final_state.tool_input:
+                    positive_prompt = final_state.tool_input.get("positive_prompt", "")
+                    negative_prompt = final_state.tool_input.get("negative_prompt", "")
+                
+                # ワークフロー選択ビューを送信
+                workflow_select_view = WorkflowSelectionView(
+                    original_message=message,
+                    positive_prompt=positive_prompt,
+                    negative_prompt=negative_prompt,
+                    bot_instance=bot
+                )
+                await message.channel.send(
+                    f'{message.author.mention} どのワークフローで画像を生成しますか？\n\n**ポジティブプロンプト:** `{positive_prompt}`\n**ネガティブプロンプト:** `{negative_prompt}`',
+                    view=workflow_select_view
+                )
+                print("Workflow selection view sent to Discord.")
             else:
-                await message.channel.send(f'{message.author.mention} {ai_response_content}', view=followup_view)
+                # 通常の応答処理
+                followup_view = None
+                if final_state.followup_questions:
+                    followup_view = View(timeout=180)
+                    for i, q_text in enumerate(final_state.followup_questions):
+                        button_custom_id = f"followup_{message.id}_{i}"
+                        followup_view.add_item(FollowupButton(label=q_text, custom_id=button_custom_id, bot_instance=bot))
+                
+                if final_state.image_output_base64:
+                    try:
+                        image_bytes = base64.b64decode(final_state.image_output_base64)
+                        image_file = discord.File(io.BytesIO(image_bytes), filename="generated_image.png")
+                        if followup_view:
+                            await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file, view=followup_view)
+                        else:
+                            await message.channel.send(f'{message.author.mention} {ai_response_content}', file=image_file)
+                        print("Generated image sent to Discord.")
+                    except Exception as img_e:
+                        print(f"Error sending image to Discord: {img_e}")
+                        if followup_view:
+                            await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)', view=followup_view)
+                        else:
+                            await message.channel.send(f'{message.author.mention} {ai_response_content}\n(画像の送信中にエラーが発生しました。)')
+                else:
+                    if followup_view:
+                        await message.channel.send(f'{message.author.mention} {ai_response_content}', view=followup_view)
+                    else:
+                        await message.channel.send(f'{message.author.mention} {ai_response_content}')
 
         except Exception as e:
             print(f"LangGraphの実行中にエラーが発生しました: {e}")

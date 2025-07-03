@@ -229,7 +229,8 @@ async def decide_tool_or_direct_response_node(state: AgentState) -> AgentState:
 
             print(f"LLM decided to call tool: {tool_name} with args: {tool_args}")
             current_state_dict["tool_name"] = tool_name
-            current_state_dict["tool_args"] = tool_args
+            current_state_dict["tool_input"] = tool_args # tool_input に格納
+            current_state_dict["tool_args"] = None # tool_args はクリア
             current_state_dict["llm_direct_response"] = None
             return AgentState(**current_state_dict)
 
@@ -310,11 +311,11 @@ async def execute_tool_node(state: AgentState) -> AgentState:
             tool_args=None
         )
 
-    print(f"Executing tool: {tool_name} with args: {tool_args}")
+    print(f"Executing tool: {tool_name} with args: {state.tool_input}")
     try:
-        if tool_args is None:
+        if state.tool_input is None:
             raise ValueError("Tool arguments are None.")
-        tool_output_result = await tool.ainvoke(tool_args)
+        tool_output_result = await tool.ainvoke(state.tool_input)
         print(f"Tool '{tool_name}' executed. Output: {str(tool_output_result)[:100]}...")
     except Exception as e:
         logger.error(f"Error executing tool '{tool_name}': {e}", exc_info=True)
@@ -333,6 +334,7 @@ async def execute_tool_node(state: AgentState) -> AgentState:
         current_state_dict["tool_output"] = str(tool_output_result)
 
     current_state_dict["tool_name"] = None
+    current_state_dict["tool_input"] = None # tool_input もクリア
     current_state_dict["tool_args"] = None
     
     return AgentState(**current_state_dict)
@@ -573,6 +575,7 @@ async def generate_followup_questions_node(state: AgentState) -> AgentState:
     
     chain = prompt | llm 
     
+    generated_json_str = "" # 初期化
     try:
         response_content = await chain.ainvoke({
             "chat_history_for_followup": chat_history_for_followup,
@@ -580,7 +583,11 @@ async def generate_followup_questions_node(state: AgentState) -> AgentState:
         })
         
         if isinstance(response_content, AIMessage):
-            generated_json_str = response_content.content
+            # AIMessageのcontentがリストの場合も考慮し、テキスト部分を結合
+            if isinstance(response_content.content, list):
+                generated_json_str = " ".join([part["text"] for part in response_content.content if isinstance(part, dict) and part.get("type") == "text"])
+            else:
+                generated_json_str = str(response_content.content) # 強制的に文字列に変換
         elif isinstance(response_content, str):
             generated_json_str = response_content
         else:
@@ -588,11 +595,11 @@ async def generate_followup_questions_node(state: AgentState) -> AgentState:
 
         print(f"LLM raw response for followup questions: {generated_json_str}")
         
+        # JSON形式の文字列を抽出
         if "```json" in generated_json_str:
             generated_json_str = generated_json_str.split("```json")[1].split("```")[0].strip()
         elif "```" in generated_json_str:
              generated_json_str = generated_json_str.split("```")[1].strip()
-
 
         followup_questions_list = json.loads(generated_json_str)
         if isinstance(followup_questions_list, list) and all(isinstance(q, str) for q in followup_questions_list):

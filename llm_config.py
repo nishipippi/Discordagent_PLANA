@@ -13,6 +13,13 @@ def get_google_api_key() -> str:
         raise ValueError("GEMINI_API_KEY 環境変数が設定されていません。")
     return api_key
 
+def get_comfyui_url() -> str:
+    """ComfyUI URLを環境変数から取得する"""
+    comfyui_url = os.getenv("COMFYUI_URL")
+    if not comfyui_url:
+        raise ValueError("COMFYUI_URL 環境変数が設定されていません。")
+    return comfyui_url
+
 def load_system_instruction(file_path: str) -> str:
     with open(file_path, 'r', encoding='utf-8') as f:
         return f.read()
